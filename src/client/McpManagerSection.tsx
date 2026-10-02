@@ -334,20 +334,35 @@ const hintStyle: CSSProperties = {
 /** models `.rowHead` gap 10 with `.modelRow`'s centred alignment between two field stacks. */
 const fieldRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 10 }
 /**
- * models `.editorActions`' `space-between` idiom for the 超时 / 报错 row: field
- * left, choices right. `flex-start` (measured, .recon/row-mock) keeps each
- * column's own caption on the same line: with `center`, a 超时 validation hint
- * grows the left column and drags the choices row 25px down with it.
+ * models `.editorActions`' `space-between` idiom for the 超时 / 报错 row: the
+ * field on the left, the checkbox and its label flush at the right end.
+ * `flex-start` (measured, .recon/row-mock) keeps the choices cell off the
+ * column's bottom: with `flex-end`, a 超时 validation hint grows the left column
+ * and drags the checkbox 25px down with it.
  */
 const timeoutRowStyle: CSSProperties = { justifyContent: 'space-between', alignItems: 'flex-start', display: 'flex' }
-/** The 超时 field takes half the row so the choices column can sit flush at the right end. */
+/** The 超时 field takes half the row so the choices cell can sit flush at the right end. */
 const timeoutFieldStyle: CSSProperties = { flex: '0 1 50%' }
 /**
- * The choices column is a field stack of its own (models `.field`), so its
- * caption shares the 超时 caption's line instead of floating beside a 32px box —
- * the official 输入类型 treatment (legend above, choices row below).
+ * The choices cell, centred on the input's rendered box: it clears the field's
+ * caption line and stack gap, then repeats the kit Input's own box model —
+ * `.wrap` is `height:32px` in `content-box` with a `.5px` border, which
+ * Chromium resolves to 33–34px depending on the device pixel ratio — so its
+ * centre lands on the input's centre at every DPR instead of half a border
+ * below (measured 0.00px at DPR 1 and 2, hint or no hint; .recon/row-mock).
+ * Only the vertical borders borrow the box model: a transparent one costs no
+ * ink but would push the label 0.5–1px inside the row's right edge, and the two
+ * ends are meant to be flush.
  */
-const checkboxFieldStyle: CSSProperties = { flexDirection: 'column', gap: 6, display: 'flex', flex: '0 1 50%' }
+const checkboxCellStyle: CSSProperties = {
+  marginTop: 24,
+  boxSizing: 'content-box',
+  height: 32,
+  borderTop: '.5px solid transparent',
+  borderBottom: '.5px solid transparent',
+  alignItems: 'center',
+  display: 'flex',
+}
 /** models `.editorHeader` title side; `space-between` + `flex-start` are the user's instruction. */
 const editorHeaderStyle: CSSProperties = {
   justifyContent: 'space-between',
@@ -369,20 +384,6 @@ const formActionsEndStyle: CSSProperties = {
   alignItems: 'center',
   gap: 8,
   marginLeft: 'auto',
-  display: 'flex',
-}
-/**
- * The choices row repeats the kit Input's own box model — `.wrap` is
- * `height:32px` in `content-box` with a `.5px` border, which Chromium renders
- * 33–34px tall — so the 16px box centres on the input's rendered box rather
- * than drifting half a border below it (measured 0.00px at DPR 1 and 2;
- * .recon/row-mock). The border is transparent: it only borrows the box model.
- */
-const checkboxCellStyle: CSSProperties = {
-  boxSizing: 'content-box',
-  height: 32,
-  border: '.5px solid transparent',
-  alignItems: 'center',
   display: 'flex',
 }
 /** models `.input` tokens; the kit ships no textarea, so this is the one native control. */
@@ -944,32 +945,19 @@ function toConfig(form: FormState, oauth: boolean): McpServerConfig {
 }
 
 /** A labelled field: label, control, and the host's validation hint for it. */
-function Field({ labelFor, label, hint, style, onLabelClick, children }: {
+function Field({ labelFor, label, hint, style, children }: {
   /** Id of the control this label names; omitted when the control owns no such id. */
   labelFor?: string | undefined
   label: string
   hint?: string | undefined
   /** Extra placement for this field, merged over the shared stack. */
   style?: CSSProperties | undefined
-  /**
-   * Makes the caption activate the control. The kit Checkbox owns its input and
-   * exposes no id, so a checkbox field cannot use `htmlFor`: it captions the
-   * control itself and this carries the click.
-   */
-  onLabelClick?: (() => void) | undefined
   children: ReactNode
 }): JSX.Element {
   return (
     <div style={{ ...fieldStyle, ...style }}>
       {labelFor === undefined
-        ? (
-          <span
-            style={onLabelClick === undefined ? labelStyle : { ...labelStyle, cursor: 'pointer' }}
-            onClick={onLabelClick}
-          >
-            {label}
-          </span>
-        )
+        ? <span style={labelStyle}>{label}</span>
         : <label style={labelStyle} htmlFor={labelFor}>{label}</label>}
       {children}
       {hint !== undefined ? <p style={hintStyle}>{hint}</p> : null}
@@ -1209,28 +1197,15 @@ export function ServerForm({
             onChange={(e) => set('toolCallTimeoutMs', e.target.value.replace(/[^0-9]/g, ''))}
           />
         </Field>
-        <Field
-          label={t('fieldFailStartup')}
-          style={checkboxFieldStyle}
-          onLabelClick={() => set('failOnStartupError', !form.failOnStartupError)}
-        >
-          <div style={checkboxCellStyle}>
-            {/*
-             * The kit Checkbox requires a `label` and owns its input, so a field
-             * that captions the control above it passes an empty one: the
-             * visible text is the field caption (12/18, the 超时 caption's own
-             * line), and `title` — which the kit forwards to its `<label>` —
-             * supplies the accessible name the empty label no longer can.
-             */}
-            <Checkbox
-              checked={form.failOnStartupError}
-              label=""
-              title={t('fieldFailStartup')}
-              disabled={locked}
-              onChange={(next) => set('failOnStartupError', next)}
-            />
-          </div>
-        </Field>
+        <div style={checkboxCellStyle}>
+          {/* The kit Checkbox owns its input and renders the label beside it. */}
+          <Checkbox
+            checked={form.failOnStartupError}
+            label={t('fieldFailStartup')}
+            disabled={locked}
+            onChange={(next) => set('failOnStartupError', next)}
+          />
+        </div>
       </div>
 
       {submitError !== null ? <p style={errorLineStyle} role="alert">{submitError}</p> : null}
