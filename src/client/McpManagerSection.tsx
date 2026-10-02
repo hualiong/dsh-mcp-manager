@@ -123,8 +123,34 @@ const introStyle: CSSProperties = {
   fontSize: 14,
   lineHeight: '22px',
 }
-/** models `.addActions` + `.editorActions` gap; general `.actions` alignment. */
-const toolbarStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8 }
+/** plugin-manager `.toolbar` — the add/refresh row. The official `justify-content:flex-end`
+ * is deliberately not applied: this panel keeps the row left-aligned under its intro line. */
+const toolbarStyle: CSSProperties = { alignItems: 'center', gap: 16, display: 'flex' }
+/** plugin-manager `.iconButton` (`:disabled` opacity/cursor are computed from `disabled`). */
+const iconButtonStyle: CSSProperties = {
+  borderRadius: 'var(--dsw-radius-sm)',
+  width: 28,
+  height: 28,
+  color: 'var(--dsw-alias-label-caption)',
+  cursor: 'pointer',
+  background: '0 0',
+  border: 0,
+  justifyContent: 'center',
+  alignItems: 'center',
+  display: 'inline-flex',
+}
+/** plugin-manager `.iconButton:disabled`. */
+const iconButtonOffStyle: CSSProperties = { opacity: 0.5, cursor: 'default' }
+/** plugin-manager `.iconWrap` around the refresh glyph. */
+const iconWrapStyle: CSSProperties = { display: 'inline-flex' }
+/** plugin-manager `.addButton` on the kit's primary `sm` Button (inline beats the kit class). */
+const addButtonStyle: CSSProperties = {
+  borderRadius: 'var(--dsw-radius-md)',
+  height: 32,
+  padding: '0 12px',
+  fontSize: 13,
+  lineHeight: '20px',
+}
 /** models `.rows` — the card list. */
 const rowsStyle: CSSProperties = {
   flexDirection: 'column',
@@ -173,6 +199,15 @@ const editorStyle: CSSProperties = {
   padding: '14px 16px',
   display: 'flex',
 }
+/** models `.addCard .editor` — the editor nested in the add card drops its own box. */
+const nestedEditorStyle: CSSProperties = {
+  borderRadius: 'var(--dsw-radius-lg)',
+  background: '0 0',
+  flexDirection: 'column',
+  gap: 14,
+  padding: 0,
+  display: 'flex',
+}
 /** models `.rowHead` — identity plus actions, one centred row. */
 const rowHeadStyle: CSSProperties = { alignItems: 'center', gap: 10, display: 'flex' }
 /** models `.rowName` + inventory `.cardTitle` ellipsis. */
@@ -184,16 +219,6 @@ const rowNameStyle: CSSProperties = {
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
-}
-/** models `.rowTag` — the entry-id chip beside the name. */
-const rowTagStyle: CSSProperties = {
-  border: '.5px solid var(--dsw-alias-border-l3)',
-  borderRadius: 'var(--dsw-radius-xs)',
-  color: 'var(--dsw-alias-label-secondary)',
-  flex: 'none',
-  padding: '1px 6px',
-  fontSize: 11,
-  lineHeight: '16px',
 }
 /** models `.rowActions` — the right-aligned control cluster (`margin-left:auto`). */
 const rowActionsStyle: CSSProperties = { alignItems: 'center', gap: 4, marginLeft: 'auto', display: 'inline-flex' }
@@ -207,7 +232,7 @@ const rowToggleStyle: CSSProperties = {
   flex: 'auto',
   padding: 0,
   border: 0,
-  background: 'none',
+  background: '0 0',
   color: 'inherit',
   font: 'inherit',
   textAlign: 'left',
@@ -222,12 +247,6 @@ const chevronWrapStyle: CSSProperties = {
 }
 /** inventory `.phaseDot` — the status dot's own slot. */
 const dotSlotStyle: CSSProperties = { flex: 'none', display: 'inline-flex' }
-/** inventory `.cardDetails` — the expanded panel (its rows carry `.details`' 8px step). */
-const cardDetailsStyle: CSSProperties = {
-  borderTop: '.5px solid var(--dsw-alias-border-l2)',
-  background: 'var(--dsw-alias-bg-module-platform)',
-  padding: '10px 14px 12px',
-}
 /** inventory `.entryValue` code face on the `.cardDescription` 12/18 colour. */
 const targetStyle: CSSProperties = {
   fontFamily: 'var(--ds-font-family-code)',
@@ -237,18 +256,15 @@ const targetStyle: CSSProperties = {
   overflowWrap: 'anywhere',
   display: 'block',
 }
-/** inventory `.statusWithDot` + `models`.modelInputChoices wrapping; `.details` margin step. */
+/** inventory `.statusWithDot` + models `.modelInputChoices` wrapping (row spacing = `.editor` gap). */
 const metaRowStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 6,
   flexWrap: 'wrap',
-  margin: '8px 0 0',
 }
 /** inventory `.statusWithDot` (plus `.status,.failure`'s `margin:0`). */
 const statusLineStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 6, margin: 0 }
-/** inventory `.statusWithDot` + `.details`' margin step between detail rows. */
-const probeLineStyle: CSSProperties = { ...statusLineStyle, margin: '8px 0 0' }
 /** inventory `.status` — the probe sentence. */
 const statusTextStyle: CSSProperties = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, lineHeight: '20px' }
 /** inventory `.failure` — the probe failure colour on the same 13/20 scale. */
@@ -496,21 +512,42 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
       <p style={introStyle}>{summaryText}</p>
 
       <div style={toolbarStyle}>
+        {/*
+         * The 插件页 toolbar, as the official page renders it: refresh is a
+         * native button wearing `.iconButton` (with the kit's Tooltip and
+         * refresh glyph), the add action is the kit's primary Button wearing
+         * `.addButton` metrics.
+         */}
+        <Tooltip
+          label={t('refresh')}
+          delayMs={500}
+          focusDelayMs={500}
+          side="bottom"
+          portal
+          disabled={loading || busy !== null}
+        >
+          <button
+            type="button"
+            style={loading || busy !== null ? { ...iconButtonStyle, ...iconButtonOffStyle } : iconButtonStyle}
+            aria-label={t('refresh')}
+            aria-busy={loading}
+            disabled={loading || busy !== null}
+            onClick={() => void refresh()}
+          >
+            <span style={iconWrapStyle} aria-hidden="true">
+              {loading ? <StateDot state="ongoing" size={18} /> : <IconRefreshOutlineRegular />}
+            </span>
+          </button>
+        </Tooltip>
         <Button
           variant="primary"
-          icon={<IconPlusOutlineRegular size={16} />}
+          size="sm"
+          style={addButtonStyle}
+          icon={<IconPlusOutlineRegular size={13} />}
           onClick={beginAdd}
           disabled={busy !== null || formOpen}
         >
           {t('addServer')}
-        </Button>
-        <Button
-          variant="outline"
-          icon={loading ? <StateDot state="ongoing" size={14} /> : <IconRefreshOutlineRegular size={16} />}
-          onClick={() => void refresh()}
-          disabled={busy !== null || loading}
-        >
-          {t('refresh')}
         </Button>
       </div>
 
@@ -532,13 +569,15 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
       <ul style={rowsStyle}>
         {form?.mode === 'add' ? (
           <li style={addCardStyle} key="add">
-            <ServerForm
-              t={t}
-              initial={undefined}
-              busy={busy !== null}
-              onCancel={closeForm}
-              onSaved={() => savedForm('add')}
-            />
+            <div style={nestedEditorStyle}>
+              <ServerForm
+                t={t}
+                initial={undefined}
+                busy={busy !== null}
+                onCancel={closeForm}
+                onSaved={() => savedForm('add')}
+              />
+            </div>
           </li>
         ) : null}
 
@@ -563,8 +602,9 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                 {/*
                  * The title area is the disclosure toggle (inventory
                  * `cardContent` as a bare button), so the title keeps the
-                 * settings-page scale. The controls live outside it in
-                 * `rowActions`: clicking one never toggles the card.
+                 * settings-page scale. Only the enable Switch shares the
+                 * header: it has to stay reachable while the card is
+                 * collapsed. Everything else lives in the expanded panel.
                  */}
                 <button
                   type="button"
@@ -574,7 +614,6 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                   onClick={() => toggleExpanded(server.id)}
                 >
                   <span style={rowNameStyle}>{displayName(server)}</span>
-                  <span style={rowTagStyle}>{server.id}</span>
                   <Tag tone={status.tone}>{statusText}</Tag>
                   <span style={{ ...chevronWrapStyle, transform: open ? 'rotate(180deg)' : 'none' }}>
                     <IconChevronDownOutlineRegular size={12} />
@@ -589,35 +628,6 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                     disabled={actionsDisabled}
                     onChange={() => toggleEnabled(server)}
                   />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    icon={probing ? <StateDot state="ongoing" size={14} /> : undefined}
-                    onClick={() => testConnection(server)}
-                    disabled={actionsDisabled}
-                  >
-                    {t('test')}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => beginEdit(server)}
-                    disabled={actionsDisabled}
-                  >
-                    {t('edit')}
-                  </Button>
-                  <Tooltip label={server.userManaged ? t('remove') : t('bundleDefined')}>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      style={dangerButtonStyle}
-                      icon={<IconTrashOutlineRegular size={14} />}
-                      onClick={() => requestRemove(server)}
-                      disabled={actionsDisabled}
-                    >
-                      {t('remove')}
-                    </Button>
-                  </Tooltip>
                 </span>
               </div>
 
@@ -632,7 +642,7 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                   />
                 </div>
               ) : open ? (
-                <div style={cardDetailsStyle} id={regionId}>
+                <div style={editorStyle} id={regionId}>
                   <span style={targetStyle} title={target}>
                     {target || (server.transport === 'stdio' ? 'stdio' : 'streamable-http')}
                   </span>
@@ -650,12 +660,12 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
 
                   {probe !== undefined ? (
                     probe.skipped === true ? (
-                      <p style={probeLineStyle}>
+                      <p style={statusLineStyle}>
                         <span style={dotSlotStyle}><StateDot state="warning" size={10} /></span>
                         <span style={statusTextStyle}>{t('probeSkipped')} {probe.error ?? ''}</span>
                       </p>
                     ) : probe.ok ? (
-                      <p style={probeLineStyle}>
+                      <p style={statusLineStyle}>
                         <span style={dotSlotStyle}><StateDot state="done" size={10} /></span>
                         <span style={statusTextStyle}>
                           {t('probeOk', {
@@ -665,7 +675,7 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                         </span>
                       </p>
                     ) : (
-                      <p style={probeLineStyle}>
+                      <p style={statusLineStyle}>
                         <span style={dotSlotStyle}><StateDot state="error" size={10} /></span>
                         <span style={failureStyle}>
                           {t('probeFail', { error: probe.error ?? 'failed', ms: String(probe.latencyMs) })}
@@ -673,6 +683,39 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                       </p>
                     )
                   ) : null}
+
+                  {/* models `.editorActions` — the row's actions, right-aligned at the panel foot. */}
+                  <div style={formActionsStyle}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      icon={probing ? <StateDot state="ongoing" size={14} /> : undefined}
+                      onClick={() => testConnection(server)}
+                      disabled={actionsDisabled}
+                    >
+                      {t('test')}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => beginEdit(server)}
+                      disabled={actionsDisabled}
+                    >
+                      {t('edit')}
+                    </Button>
+                    <Tooltip label={server.userManaged ? t('remove') : t('bundleDefined')}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        style={dangerButtonStyle}
+                        icon={<IconTrashOutlineRegular size={14} />}
+                        onClick={() => requestRemove(server)}
+                        disabled={actionsDisabled}
+                      >
+                        {t('remove')}
+                      </Button>
+                    </Tooltip>
+                  </div>
                 </div>
               ) : null}
             </li>
