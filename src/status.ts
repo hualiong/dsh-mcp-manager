@@ -17,6 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // declaration merges into the program (runtime never imports these packages).
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
+import type { McpPatchRow } from './patch.ts'
 import {
   MCP_CLIENT_PACKAGES,
   MCP_OAUTH_CLIENT_PACKAGE,
@@ -92,27 +93,68 @@ export interface McpServerEntry {
   config: McpServerConfig
 }
 
-/** Enumerate every live MCP server instance with its status projection. */
-export function listMcpServers(ctx: Context, userManaged: (id: string) => boolean): McpServerInfo[] {
+/** Enumerate every MCP server with its status projection. */
+export function listMcpServers(
+  ctx: Context,
+  fileRows: readonly McpPatchRow[] = [],
+): McpServerInfo[] {
+  const byId = new Map(fileRows.map((row) => [row.id, row]))
   const servers: McpServerInfo[] = []
+  const composed = new Set<string>()
   for (const entry of ctx.loader.entries()) {
     if (entry.options.group) continue
     const ownerPackage = entry.options.name
     if (!MCP_CLIENT_PACKAGES.includes(ownerPackage)) continue
-    const config = toServerConfig(entry.options.config, ownerPackage === MCP_OAUTH_CLIENT_PACKAGE)
-    const phase = entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state] ?? null
     const id = normalizeEntryId(entry.id)
+    const oauth = ownerPackage === MCP_OAUTH_CLIENT_PACKAGE
+    const live = toServerConfig(entry.options.config, oauth)
+    const fileRow = byId.get(id)
+    composed.add(id)
     servers.push({
-      ...config,
+      ...reportedConfig(entry.options.config, fileRow, oauth),
       id,
       ownerPackage,
       enabled: !entry.disabled,
-      fiberPhase: phase,
-      toolCount: countServerTools(ctx, config.serverName),
-      userManaged: userManaged(id),
+      fiberPhase: entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state] ?? null,
+      // Tools belong to the running bridge, so count them under the name the
+      // live entry still runs, not the name the file was just edited to.
+      toolCount: countServerTools(ctx, live.serverName),
+      userManaged: fileRow !== undefined,
+    })
+  }
+  // A row the file declares but the loader has not composed yet (just added, or
+  // mid-reload) must not stay invisible until the next reload.
+  for (const row of fileRows) {
+    if (composed.has(row.id) || row.ownerPackage === '') continue
+    const oauth = row.ownerPackage === MCP_OAUTH_CLIENT_PACKAGE
+    const config = toServerConfig(row.config, oauth)
+    if (config.serverName === '') continue
+    servers.push({
+      ...config,
+      id: row.id,
+      ownerPackage: row.ownerPackage,
+      enabled: row.disabled !== true,
+      fiberPhase: null,
+      toolCount: 0,
+      userManaged: true,
     })
   }
   return servers
+}
+
+/**
+ * The config to report for one live entry: the patch file's row is what the
+ * user just saved, so it wins per key over the live entry's config (which the
+ * loader has not caught up with yet). Keys the row does not mention stay live.
+ */
+function reportedConfig(
+  entryConfig: unknown,
+  fileRow: McpPatchRow | undefined,
+  oauth: boolean,
+): McpServerConfig {
+  const file = fileRow?.config
+  if (!isRecord(file)) return toServerConfig(entryConfig, oauth)
+  return toServerConfig({ ...(isRecord(entryConfig) ? entryConfig : {}), ...file }, oauth)
 }
 
 /** Resolve one MCP server row (owned by any recognised bridge package). */

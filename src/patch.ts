@@ -20,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import * as yaml from 'js-yaml'
-import { MCP_CLIENT_PACKAGE, MCP_OAUTH_CLIENT_PACKAGE, type McpServerConfig } from './shared.ts'
+import { MCP_CLIENT_PACKAGE, MCP_CLIENT_PACKAGES, MCP_OAUTH_CLIENT_PACKAGE, type McpServerConfig } from './shared.ts'
 
 /**
  * Mirrors `isJsExpr` from @deepseek-ai/cordis-plugin-loader (the harness's own
@@ -280,7 +280,49 @@ export function updateMcpConfig(
   }))
 }
 
-/** Whether an entry id is present in the user patch (removable/editable). */
-export function patchHasId(rows: PatchRow[], id: string): boolean {
-  return locate(rows, id) !== undefined
+/** One MCP server row declared by the user patch file. */
+export interface McpPatchRow {
+  /** File-level entry id. */
+  id: string
+  /** Owning bridge package the row names, or `''` when the row only overrides fields. */
+  ownerPackage: string
+  /** Raw row config; a top-level override row may carry only a few keys. */
+  config: unknown
+  /** Row-level disabled flag, present when the row states one. */
+  disabled?: boolean
+}
+
+/** Whether a patch entry names an MCP bridge, or leaves the name to the row it overrides. */
+function namesMcpBridge(entry: Record<string, unknown>): boolean {
+  const name = entry['name']
+  return name === undefined || (typeof name === 'string' && MCP_CLIENT_PACKAGES.includes(name))
+}
+
+/** Project one patch entry (top-level row or insert item) into a file row. */
+function toMcpPatchRow(entry: Record<string, unknown>, id: string): McpPatchRow {
+  const name = entry['name']
+  return {
+    id,
+    ownerPackage: typeof name === 'string' ? name : '',
+    config: entry['config'],
+    disabled: typeof entry['disabled'] === 'boolean' ? entry['disabled'] : undefined,
+  }
+}
+
+/**
+ * Every MCP server row the patch file declares, in file order: insert items
+ * (a full config) and top-level override rows (possibly a partial one). Rows
+ * naming an unrelated plugin are skipped.
+ */
+export function readMcpPatchRows(rows: PatchRow[]): McpPatchRow[] {
+  const out: McpPatchRow[] = []
+  for (const row of rows) {
+    if (typeof row.id === 'string' && namesMcpBridge(row)) out.push(toMcpPatchRow(row, row.id))
+    if (!Array.isArray(row.insert)) continue
+    for (const item of row.insert) {
+      const id = item['id']
+      if (typeof id === 'string' && namesMcpBridge(item)) out.push(toMcpPatchRow(item, id))
+    }
+  }
+  return out
 }

@@ -170,6 +170,11 @@ function endpoint(route, name, payload) {
   return call(route, { url: `/mcp-manager/${name}`, body: { payload } })
 }
 
+/** The server array of a `list` reply. */
+function listOf(reply) {
+  return reply.json.value.servers
+}
+
 test('mounts a prefix route on the shared channel path', () => {
   const { route } = harness()
   assert.equal(route.kind, 'prefix')
@@ -395,6 +400,50 @@ test('probe still connects to a stdio server for real', async () => {
   assert.equal(result.ok, true, result.error)
   assert.equal(result.toolCount, 1)
   assert.ok(result.latencyMs >= 0)
+})
+
+test('list reflects a just-saved edit without waiting for the loader', async () => {
+  const { route } = harness()
+  const before = await endpoint(route, 'list', null)
+  const original = before.json.value.servers.find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.equal(original.serverName, 'cloudflare')
+  assert.equal(original.url, 'https://mcp.cloudflare.com/mcp')
+
+  await endpoint(route, 'update', {
+    id: 'oauth-mcp-cloudflare',
+    config: {
+      serverName: 'cloudflare-renamed',
+      transport: 'streamable-http',
+      url: 'https://mcp.cloudflare.com/mcp/v2',
+    },
+  })
+
+  // The fake loader still reports the pre-edit config; the file already holds
+  // the new one, and the panel must see what the user just saved.
+  const row = listOf(await endpoint(route, 'list', null)).find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.equal(row.serverName, 'cloudflare-renamed')
+  assert.equal(row.url, 'https://mcp.cloudflare.com/mcp/v2')
+  assert.equal(row.credentialRef, 'CLOUDFLARE_MCP_OAUTH', 'the file row keeps the credential reference')
+  assert.equal(row.callbackPort, 45_871)
+  assert.equal(row.fiberPhase, 'active', 'status still describes the running bridge')
+  assert.equal(row.toolCount, 1, 'tools are counted under the name the bridge still runs')
+  assert.equal(row.enabled, true)
+  assert.equal(row.userManaged, true)
+})
+
+test('list shows a freshly added server before the loader composes it', async () => {
+  const { route } = harness()
+  await endpoint(route, 'add', {
+    id: 'mcp-fresh',
+    config: { serverName: 'fresh', transport: 'streamable-http', url: 'https://fresh.example/mcp' },
+  })
+
+  const row = listOf(await endpoint(route, 'list', null)).find((server) => server.id === 'mcp-fresh')
+  assert.equal(row.serverName, 'fresh')
+  assert.equal(row.ownerPackage, '@deepseek-ai/dsh-mcp-client')
+  assert.equal(row.fiberPhase, null)
+  assert.equal(row.toolCount, 0)
+  assert.equal(row.userManaged, true)
 })
 
 test('an unreachable endpoint is a handled failure, not a transport error', async () => {

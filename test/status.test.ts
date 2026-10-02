@@ -11,7 +11,7 @@ import {
 } from '../src/shared.ts'
 import {
   addMcpRow,
-  patchHasId,
+  readMcpPatchRows,
   removeMcpRow,
   setMcpEnabled,
   updateMcpConfig,
@@ -78,7 +78,7 @@ function fakeCtx(entries = ENTRIES) {
 }
 
 test('listMcpServers enumerates both bridge packages and skips everything else', () => {
-  const servers = listMcpServers(fakeCtx(), (id) => id === 'oauth-mcp-cloudflare')
+  const servers = listMcpServers(fakeCtx(), readMcpPatchRows([OAUTH_ROW]))
   assert.deepEqual(servers.map((server) => server.serverName).sort(), ['cloudflare', 'github', 'idle'])
 
   const cloudflare = servers.find((server) => server.serverName === 'cloudflare')
@@ -266,9 +266,104 @@ test('removeMcpRow drops the item and the emptied insert row', () => {
   assert.deepEqual(partial, [{ insert: [{ id: 'b' }] }])
 })
 
-test('patchHasId sees top-level rows and insert items', () => {
-  const rows = structuredClone([OAUTH_ROW, { id: 'keep', name: MCP_CLIENT_PACKAGE }])
-  assert.equal(patchHasId(rows, 'oauth-mcp-cloudflare'), true)
-  assert.equal(patchHasId(rows, 'keep'), true)
-  assert.equal(patchHasId(rows, 'nope'), false)
+test('readMcpPatchRows sees both file shapes and skips unrelated plugins', () => {
+  const rows = readMcpPatchRows([
+    OAUTH_ROW,
+    { id: 'mcp-github', name: MCP_CLIENT_PACKAGE, disabled: true, config: { url: 'https://override/mcp' } },
+    { id: 'nameless', config: { url: 'https://nameless/mcp' } },
+    { id: 'ui-settings', name: '@deepseek-ai/dsh-client-ui-settings', config: { enabled: true } },
+    { id: 'a-group', name: 'some-plugin', group: true },
+  ])
+
+  assert.deepEqual(rows.map((row) => row.id), ['oauth-mcp-cloudflare', 'mcp-github', 'nameless'])
+  assert.equal(rows[0].ownerPackage, MCP_OAUTH_CLIENT_PACKAGE)
+  assert.deepEqual(rows[0].config, OAUTH_ROW.insert[0].config)
+  assert.equal(rows[1].ownerPackage, MCP_CLIENT_PACKAGE)
+  assert.equal(rows[1].disabled, true)
+  assert.equal(rows[2].ownerPackage, '', 'a row that only overrides fields names no package')
+  assert.deepEqual(readMcpPatchRows([]), [])
+})
+
+test('the patch file wins per key while the live status survives', () => {
+  const ctx = fakeCtx()
+  const rows = readMcpPatchRows([{
+    insert: [{
+      id: 'oauth-mcp-cloudflare',
+      name: MCP_OAUTH_CLIENT_PACKAGE,
+      config: {
+        serverName: 'cloudflare-renamed',
+        url: 'https://renamed.example/mcp',
+        credentialRef: 'RENAMED_REF',
+      },
+    }],
+  }])
+  const servers = listMcpServers(ctx, rows)
+  const cloudflare = servers.find((server) => server.id === 'oauth-mcp-cloudflare')
+
+  // File values win.
+  assert.equal(cloudflare.serverName, 'cloudflare-renamed')
+  assert.equal(cloudflare.url, 'https://renamed.example/mcp')
+  assert.equal(cloudflare.credentialRef, 'RENAMED_REF')
+  // Keys the file does not mention stay live ...
+  assert.equal(cloudflare.scope, 'mcp.read')
+  assert.equal(cloudflare.callbackPort, 45_871)
+  assert.equal(cloudflare.authorizationTimeoutMs, 600_000)
+  // ... and the running bridge keeps describing the status.
+  assert.equal(cloudflare.enabled, true)
+  assert.equal(cloudflare.fiberPhase, 'active')
+  assert.equal(cloudflare.toolCount, 1, 'tools belong to the name the live entry still runs')
+  assert.equal(cloudflare.userManaged, true)
+})
+
+test('a partial top-level override row merges over the live entry', () => {
+  const rows = readMcpPatchRows([
+    { id: 'mcp-github', name: MCP_CLIENT_PACKAGE, config: { url: 'https://override.example/mcp' } },
+  ])
+  const servers = listMcpServers(fakeCtx(), rows)
+  const github = servers.find((server) => server.id === 'mcp-github')
+
+  assert.equal(github.url, 'https://override.example/mcp')
+  assert.equal(github.serverName, 'github')
+  assert.equal(github.transport, 'streamable-http')
+  assert.equal(github.toolCallTimeoutMs, 12_345)
+  assert.deepEqual(github.reconnect, { enabled: true, maxAttempts: 20 })
+  assert.equal(github.enabled, false)
+  assert.equal(github.fiberPhase, 'active')
+  assert.equal(github.toolCount, 2)
+  assert.equal(github.userManaged, true)
+})
+
+test('a file row with no live entry yet is listed as not loaded', () => {
+  const rows = readMcpPatchRows([{
+    insert: [{
+      id: 'mcp-fresh',
+      name: MCP_CLIENT_PACKAGE,
+      config: { serverName: 'fresh', transport: 'streamable-http', url: 'https://fresh.example/mcp' },
+    }],
+  }])
+  const servers = listMcpServers(fakeCtx(), rows)
+  const fresh = servers.find((server) => server.id === 'mcp-fresh')
+
+  assert.equal(fresh.serverName, 'fresh')
+  assert.equal(fresh.ownerPackage, MCP_CLIENT_PACKAGE)
+  assert.equal(fresh.enabled, true)
+  assert.equal(fresh.fiberPhase, null, 'the panel renders this as "not loaded"')
+  assert.equal(fresh.toolCount, 0)
+  assert.equal(fresh.userManaged, true)
+  // Live entries are not duplicated by their own file rows.
+  assert.equal(servers.filter((server) => server.id === 'oauth-mcp-cloudflare').length, 1)
+
+  const disabled = listMcpServers(fakeCtx(), readMcpPatchRows([
+    { id: 'mcp-fresh-2', name: MCP_CLIENT_PACKAGE, disabled: true, config: { serverName: 'fresh2' } },
+  ])).find((server) => server.id === 'mcp-fresh-2')
+  assert.equal(disabled.enabled, false)
+  assert.equal(disabled.fiberPhase, null)
+
+  // A nameless override whose entry is gone, or a row with no serverName, is not a server.
+  const nameless = listMcpServers(fakeCtx(), readMcpPatchRows([{ id: 'ghost', config: { url: 'https://g/mcp' } }]))
+  assert.equal(nameless.some((server) => server.id === 'ghost'), false)
+  const blank = listMcpServers(fakeCtx(), readMcpPatchRows([
+    { id: 'blank', name: MCP_CLIENT_PACKAGE, config: { url: 'https://b/mcp' } },
+  ]))
+  assert.equal(blank.some((server) => server.id === 'blank'), false)
 })

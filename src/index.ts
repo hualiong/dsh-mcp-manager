@@ -41,7 +41,7 @@ import {
 import {
   addMcpRow,
   editPatchList,
-  patchHasId,
+  readMcpPatchRows,
   readPatchList,
   removeMcpRow,
   resolvePatchPath,
@@ -234,8 +234,9 @@ async function dispatch(
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
     case 'list': {
-      const rows = readPatchList(patchFile)
-      const servers: McpServerInfo[] = listMcpServers(ctx, (id) => patchHasId(rows, id))
+      // The patch file is the authority for config: it holds what the user just
+      // saved, while the loader entry still describes the previous edit.
+      const servers: McpServerInfo[] = listMcpServers(ctx, readMcpPatchRows(readPatchList(patchFile)))
       return ok({ servers })
     }
     case 'patchInfo': {
