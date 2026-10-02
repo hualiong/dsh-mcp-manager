@@ -20,7 +20,7 @@ export type McpManagerKeys =
   | 'title'
   | 'unnamed'
   | 'total'
-  | 'addServer'
+  | 'addMcp'
   | 'connected'
   | 'failed'
   | 'enabledOf'
@@ -87,14 +87,14 @@ export const zh: McpManagerDict = {
   title: 'MCP 服务器',
   unnamed: '（未命名）',
   total: '共 {count} 个',
-  addServer: '添加服务器',
+  addMcp: '添加 MCP',
   connected: '{count} 个已连接',
   failed: '{count} 个失败',
   enabledOf: '{count}/{total} 已启用',
   refresh: '刷新',
   loading: '正在加载服务器…',
   empty: '尚未配置 MCP 服务器。',
-  emptyHint: '点击“添加服务器”开始接入。',
+  emptyHint: '点击“添加 MCP”开始接入。',
   patchMissing: '补丁文件缺失',
   removeTitle: '删除 MCP 服务器',
   removeDesc: '将从 cordis.patch.yml 中删除“{name}”（{id}），并断开它的全部工具。此操作不可恢复。',
@@ -146,14 +146,14 @@ export const en: McpManagerDict = {
   title: 'MCP servers',
   unnamed: '(unnamed)',
   total: '{count} total',
-  addServer: 'Add server',
+  addMcp: 'Add MCP',
   connected: '{count} connected',
   failed: '{count} failed',
   enabledOf: '{count}/{total} enabled',
   refresh: 'Refresh',
   loading: 'Loading servers…',
   empty: 'No MCP servers configured.',
-  emptyHint: 'Use “Add server” to connect one.',
+  emptyHint: 'Use “Add MCP” to connect one.',
   patchMissing: 'patch file missing',
   removeTitle: 'Remove MCP server',
   removeDesc: 'This removes "{name}" ({id}) from cordis.patch.yml and disconnects all of its tools. It cannot be undone.',

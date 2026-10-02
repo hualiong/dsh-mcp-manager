@@ -123,24 +123,31 @@ const introStyle: CSSProperties = {
   fontSize: 14,
   lineHeight: '22px',
 }
-/** plugin-manager `.toolbar` — the add/refresh row. The official `justify-content:flex-end`
- * is deliberately not applied: this panel keeps the row left-aligned under its intro line. */
-const toolbarStyle: CSSProperties = { alignItems: 'center', gap: 16, display: 'flex' }
-/** plugin-manager `.iconButton` (`:disabled` opacity/cursor are computed from `disabled`). */
-const iconButtonStyle: CSSProperties = {
-  borderRadius: 'var(--dsw-radius-sm)',
+/** plugin-manager `.pageHead` — heading block left, toolbar right (its `padding-top:28px` is page chrome). */
+const pageHeadStyle: CSSProperties = {
+  justifyContent: 'space-between',
+  alignItems: 'flex-start',
+  gap: 16,
+  display: 'flex',
+}
+/** models `.rowIdentity` / inventory `.cardMainRow` — the shrinking-child `min-width:0` idiom. */
+const titleBlockStyle: CSSProperties = { minWidth: 0 }
+/** plugin-manager `.toolbar` — the [refresh][add] cluster at the heading's right edge. */
+const toolbarStyle: CSSProperties = {
+  justifyContent: 'flex-end',
+  alignItems: 'center',
+  gap: 16,
+  display: 'flex',
+}
+/** plugin-manager `.iconButton` box and colour on the kit ghost Button (hover/focus come from the kit). */
+const refreshButtonStyle: CSSProperties = {
   width: 28,
   height: 28,
+  padding: 0,
   color: 'var(--dsw-alias-label-caption)',
-  cursor: 'pointer',
-  background: '0 0',
-  border: 0,
-  justifyContent: 'center',
-  alignItems: 'center',
-  display: 'inline-flex',
 }
 /** plugin-manager `.iconButton:disabled`. */
-const iconButtonOffStyle: CSSProperties = { opacity: 0.5, cursor: 'default' }
+const refreshButtonOffStyle: CSSProperties = { opacity: 0.5, cursor: 'default' }
 /** plugin-manager `.iconWrap` around the refresh glyph. */
 const iconWrapStyle: CSSProperties = { display: 'inline-flex' }
 /** plugin-manager `.addButton` on the kit's primary `sm` Button (inline beats the kit class). */
@@ -508,48 +515,55 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
 
   return (
     <section style={sectionStyle}>
-      <h2 style={titleStyle}>{t('title')}</h2>
-      <p style={introStyle}>{summaryText}</p>
+      {/*
+       * The 插件页 header: heading block on the left, `.toolbar` at the right
+       * edge of the same row. Refresh is the kit's ghost Button wearing the
+       * official icon-button box (so hover comes from the kit's own
+       * `.ghost:hover` token and focus from the platform), with the kit
+       * Tooltip, the glyph swap while refreshing, and the add action as the
+       * kit's primary Button wearing `.addButton` metrics.
+       */}
+      <header style={pageHeadStyle}>
+        <div style={titleBlockStyle}>
+          <h2 style={titleStyle}>{t('title')}</h2>
+          <p style={introStyle}>{summaryText}</p>
+        </div>
 
-      <div style={toolbarStyle}>
-        {/*
-         * The 插件页 toolbar, as the official page renders it: refresh is a
-         * native button wearing `.iconButton` (with the kit's Tooltip and
-         * refresh glyph), the add action is the kit's primary Button wearing
-         * `.addButton` metrics.
-         */}
-        <Tooltip
-          label={t('refresh')}
-          delayMs={500}
-          focusDelayMs={500}
-          side="bottom"
-          portal
-          disabled={loading || busy !== null}
-        >
-          <button
-            type="button"
-            style={loading || busy !== null ? { ...iconButtonStyle, ...iconButtonOffStyle } : iconButtonStyle}
-            aria-label={t('refresh')}
-            aria-busy={loading}
+        <div style={toolbarStyle}>
+          <Tooltip
+            label={t('refresh')}
+            delayMs={500}
+            focusDelayMs={500}
+            side="bottom"
+            portal
             disabled={loading || busy !== null}
-            onClick={() => void refresh()}
           >
-            <span style={iconWrapStyle} aria-hidden="true">
-              {loading ? <StateDot state="ongoing" size={18} /> : <IconRefreshOutlineRegular />}
-            </span>
-          </button>
-        </Tooltip>
-        <Button
-          variant="primary"
-          size="sm"
-          style={addButtonStyle}
-          icon={<IconPlusOutlineRegular size={13} />}
-          onClick={beginAdd}
-          disabled={busy !== null || formOpen}
-        >
-          {t('addServer')}
-        </Button>
-      </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              style={loading || busy !== null ? { ...refreshButtonStyle, ...refreshButtonOffStyle } : refreshButtonStyle}
+              aria-label={t('refresh')}
+              aria-busy={loading}
+              disabled={loading || busy !== null}
+              onClick={() => void refresh()}
+            >
+              <span style={iconWrapStyle} aria-hidden="true">
+                {loading ? <StateDot state="ongoing" size={18} /> : <IconRefreshOutlineRegular />}
+              </span>
+            </Button>
+          </Tooltip>
+          <Button
+            variant="primary"
+            size="sm"
+            style={addButtonStyle}
+            icon={<IconPlusOutlineRegular size={13} />}
+            onClick={beginAdd}
+            disabled={busy !== null || formOpen}
+          >
+            {t('addMcp')}
+          </Button>
+        </div>
+      </header>
 
       {error !== null ? <p style={errorLineStyle} role="alert">{error}</p> : null}
 
@@ -1075,7 +1089,7 @@ function ServerForm({ t, initial, busy, onCancel, onSaved }: ServerFormProps): J
           onClick={() => void submit()}
           disabled={locked}
         >
-          {editing ? t('save') : t('addServer')}
+          {editing ? t('save') : t('addMcp')}
         </Button>
       </div>
     </>
