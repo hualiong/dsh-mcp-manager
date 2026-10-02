@@ -194,7 +194,12 @@ const rowsStyle: CSSProperties = {
   listStyle: 'none',
   display: 'flex',
 }
-/** models `.rowCard` — one server card. */
+/**
+ * models `.rowCard` — one server card, with ONE stroke in every state
+ * (collapsed, expanded, failed). The failure is carried by the red status chip
+ * instead of a second border: a `border-color` declaration that cannot resolve
+ * falls back to `currentColor`, which is what produced the stray light stroke.
+ */
 const rowCardStyle: CSSProperties = {
   border: '.5px solid var(--dsw-alias-settings-card-stroke)',
   background: 'var(--dsw-alias-settings-card-fill)',
@@ -203,16 +208,6 @@ const rowCardStyle: CSSProperties = {
   gap: 12,
   padding: '12px 14px',
   display: 'flex',
-}
-/** inventory `.card[data-failed=true]` — the card's stroke colour only. */
-const rowCardFailedStyle: CSSProperties = {
-  ...rowCardStyle,
-  borderColor: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent)',
-}
-/** inventory `.card[data-open=true]` — an expanded card's stroke; failure wins (source order). */
-const rowCardOpenStyle: CSSProperties = {
-  ...rowCardStyle,
-  borderColor: 'var(--dsw-alias-border-l3)',
 }
 /** models `.addCard` / `.setupCard` — the add form's card. */
 const addCardStyle: CSSProperties = {
@@ -330,6 +325,10 @@ const hintStyle: CSSProperties = {
 }
 /** models `.rowHead` gap 10 with `.modelRow`'s centred alignment between two field stacks. */
 const fieldRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 10 }
+/** models `.editorActions`' `space-between` idiom for the 超时 / 报错 row: field left, choices right. */
+const timeoutRowStyle: CSSProperties = { justifyContent: 'space-between', alignItems: 'center', display: 'flex' }
+/** The 超时 field takes half the row so the choices row can sit flush at the right end. */
+const timeoutFieldStyle: CSSProperties = { flex: '0 1 50%' }
 /** models `.editorHeader` title side; `space-between` + `flex-start` are the user's instruction. */
 const editorHeaderStyle: CSSProperties = {
   justifyContent: 'space-between',
@@ -513,17 +512,28 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     void run(() => callRpc('remove', { id: target.id }), `remove:${target.id}`)
   }, [removing, run])
 
+  /**
+   * One delayed re-read (~800ms) after a save: the immediate read returns as
+   * soon as the patch file is written, while the live fiber's status needs a
+   * moment to settle. A single retry, never a polling loop.
+   */
+  const refreshSoon = useCallback(() => {
+    window.setTimeout(() => { void refresh() }, 800)
+  }, [refresh])
+
   /** The add card saved: close it, then re-read the host list. */
   const savedAdd = useCallback(() => {
     setAdding(false)
     void run(() => Promise.resolve(), 'form:add')
-  }, [run])
+    refreshSoon()
+  }, [refreshSoon, run])
 
   /** A card's form saved: collapse the card, then re-read the host list. */
   const savedEdit = useCallback((id: string) => {
     closeCard(id)
     void run(() => Promise.resolve(), `form:update:${id}`)
-  }, [closeCard, run])
+    refreshSoon()
+  }, [closeCard, refreshSoon, run])
 
   const summary = useMemo(() => {
     const enabled = servers.filter((s) => s.enabled).length
@@ -636,7 +646,7 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
           const regionId = `mcp-details-${server.id}`
           return (
             <li
-              style={failed ? rowCardFailedStyle : open ? rowCardOpenStyle : rowCardStyle}
+              style={rowCardStyle}
               key={server.id}
               data-open={open ? 'true' : undefined}
               data-failed={failed ? 'true' : undefined}
@@ -759,6 +769,10 @@ interface FormState {
   headersText: string
   toolCallTimeoutMs: string
   failOnStartupError: boolean
+  /** OAuth rows only: the credential reference the bridge stores its OAuth state under. */
+  credentialRef: string
+  /** OAuth rows only: the loopback callback port (`0` = OS-assigned). */
+  callbackPort: string
 }
 
 const EMPTY_FORM: FormState = {
@@ -773,6 +787,8 @@ const EMPTY_FORM: FormState = {
   headersText: '',
   toolCallTimeoutMs: '',
   failOnStartupError: false,
+  credentialRef: '',
+  callbackPort: '',
 }
 
 function toForm(server: McpServerInfo | undefined): FormState {
@@ -789,6 +805,8 @@ function toForm(server: McpServerInfo | undefined): FormState {
     headersText: (server.headers !== undefined ? Object.entries(server.headers).map(([k, v]) => `${k}: ${v}`) : []).join('\n'),
     toolCallTimeoutMs: server.toolCallTimeoutMs !== undefined ? String(server.toolCallTimeoutMs) : '',
     failOnStartupError: server.failOnStartupError === true,
+    credentialRef: server.credentialRef ?? '',
+    callbackPort: server.callbackPort !== undefined ? String(server.callbackPort) : '',
   }
 }
 
@@ -823,7 +841,15 @@ function parsePairs(text: string): Record<string, string> | undefined {
   return out
 }
 
-function toConfig(form: FormState): McpServerConfig {
+/**
+ * Build the wire config from the draft. OAuth-owned rows also carry the two
+ * bridge keys the form exposes; the host validates them and merges the bridge's
+ * other keys onto the row.
+ * @param form - the current draft.
+ * @param oauth - whether this row is owned by the OAuth bridge.
+ * @returns the config payload.
+ */
+function toConfig(form: FormState, oauth: boolean): McpServerConfig {
   const config: McpServerConfig = {
     serverName: form.serverName.trim(),
     transport: form.transport,
@@ -844,19 +870,27 @@ function toConfig(form: FormState): McpServerConfig {
     config.toolCallTimeoutMs = Number(form.toolCallTimeoutMs)
   }
   if (form.failOnStartupError) config.failOnStartupError = true
+  if (oauth) {
+    if (form.credentialRef.trim() !== '') config.credentialRef = form.credentialRef.trim()
+    if (form.callbackPort.trim() !== '' && Number.isFinite(Number(form.callbackPort))) {
+      config.callbackPort = Number(form.callbackPort)
+    }
+  }
   return config
 }
 
 /** A labelled field: label, control, and the host's validation hint for it. */
-function Field({ labelFor, label, hint, children }: {
+function Field({ labelFor, label, hint, style, children }: {
   /** Id of the control this label names; omitted when the control owns no such id. */
   labelFor?: string | undefined
   label: string
   hint?: string | undefined
+  /** Extra placement for this field, merged over the shared stack. */
+  style?: CSSProperties | undefined
   children: ReactNode
 }): JSX.Element {
   return (
-    <div style={fieldStyle}>
+    <div style={{ ...fieldStyle, ...style }}>
       {labelFor === undefined
         ? <span style={labelStyle}>{label}</span>
         : <label style={labelStyle} htmlFor={labelFor}>{label}</label>}
@@ -907,7 +941,7 @@ export function ServerForm({
     setSubmitError(null)
     setFieldErrors({})
     try {
-      const payload = { id: form.id.trim(), config: toConfig(form) }
+      const payload = { id: form.id.trim(), config: toConfig(form, oauth === true) }
       await callRpc(editing ? 'update' : 'add', payload)
       onSaved()
     } catch (err) {
@@ -1043,6 +1077,34 @@ export function ServerForm({
         </>
       )}
 
+      {/* OAuth-owned rows carry these two bridge keys; the host validates them and merges the rest. */}
+      {oauth === true ? (
+        <div style={fieldRowStyle}>
+          <Field labelFor="dshmcp-credential" label={t('fieldCredentialRef')} hint={err('credentialRef')}>
+            <Input
+              id="dshmcp-credential"
+              value={form.credentialRef}
+              placeholder="CLOUDFLARE_MCP_OAUTH"
+              spellCheck={false}
+              aria-invalid={err('credentialRef') !== undefined}
+              disabled={locked}
+              onChange={(e) => set('credentialRef', e.target.value)}
+            />
+          </Field>
+          <Field labelFor="dshmcp-callback-port" label={t('fieldCallbackPort')} hint={err('callbackPort')}>
+            <Input
+              id="dshmcp-callback-port"
+              value={form.callbackPort}
+              inputMode="numeric"
+              placeholder="45871"
+              aria-invalid={err('callbackPort') !== undefined}
+              disabled={locked}
+              onChange={(e) => set('callbackPort', e.target.value.replace(/[^0-9]/g, ''))}
+            />
+          </Field>
+        </div>
+      ) : null}
+
       <Field labelFor="dshmcp-headers" label={t('fieldHeaders')} hint={err('headers')}>
         <textarea
           id="dshmcp-headers"
@@ -1056,8 +1118,13 @@ export function ServerForm({
         />
       </Field>
 
-      <div style={fieldRowStyle}>
-        <Field labelFor="dshmcp-timeout" label={t('fieldTimeout')} hint={err('toolCallTimeoutMs')}>
+      <div style={timeoutRowStyle}>
+        <Field
+          labelFor="dshmcp-timeout"
+          label={t('fieldTimeout')}
+          hint={err('toolCallTimeoutMs')}
+          style={timeoutFieldStyle}
+        >
           <Input
             id="dshmcp-timeout"
             value={form.toolCallTimeoutMs}

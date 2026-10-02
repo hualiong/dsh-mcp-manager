@@ -61,6 +61,8 @@ export type McpManagerKeys =
   | 'fieldHeaders'
   | 'fieldTimeout'
   | 'fieldFailStartup'
+  | 'fieldCredentialRef'
+  | 'fieldCallbackPort'
   | 'cancel'
   | 'save'
   | 'errDuplicateId'
@@ -125,6 +127,8 @@ export const zh: McpManagerDict = {
   fieldHeaders: '请求头（Key: Value，每行一个）',
   fieldTimeout: '超时（毫秒，可选）',
   fieldFailStartup: '启动失败即报错',
+  fieldCredentialRef: '凭据引用（OAuth）',
+  fieldCallbackPort: '回调端口（OAuth）',
   cancel: '取消',
   save: '保存',
   errDuplicateId: '条目 ID 已被使用',
@@ -181,6 +185,8 @@ export const en: McpManagerDict = {
   fieldHeaders: 'Headers (Key: Value, one per line)',
   fieldTimeout: 'Timeout (ms, optional)',
   fieldFailStartup: 'Fail on startup error',
+  fieldCredentialRef: 'Credential reference (OAuth)',
+  fieldCallbackPort: 'Callback port (OAuth)',
   cancel: 'Cancel',
   save: 'Save',
   errDuplicateId: 'Entry id is already in use',
