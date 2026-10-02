@@ -137,10 +137,10 @@ const titleStyle: CSSProperties = {
   fontWeight: 500,
   lineHeight: '24px',
 }
-/** plugin-manager `.pageIntro` margin on the models `.intro` scale. */
+/** models `.intro` — the summary sentence under the heading (spacing comes from `.section`'s gap). */
 const introStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-tertiary)',
-  margin: '4px 0 0',
+  margin: 0,
   fontSize: 14,
   lineHeight: '22px',
 }
@@ -152,8 +152,13 @@ const pageHeadStyle: CSSProperties = {
   gap: 16,
   display: 'flex',
 }
-/** models `.rowIdentity` / inventory `.cardMainRow` — the shrinking-child `min-width:0` idiom. */
-const titleBlockStyle: CSSProperties = { minWidth: 0 }
+/** models `.section` column (gap 12) on the heading block; `min-width:0` from `.rowIdentity`. */
+const titleBlockStyle: CSSProperties = {
+  flexDirection: 'column',
+  gap: 12,
+  display: 'flex',
+  minWidth: 0,
+}
 /** plugin-manager `.toolbar` — the [refresh][add] cluster at the heading's right edge. */
 const toolbarStyle: CSSProperties = {
   justifyContent: 'flex-end',
@@ -249,16 +254,6 @@ const rowNameStyle: CSSProperties = {
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 }
-/** models `.rowTag` — the identity chips beside the name (transport, OAuth). */
-const rowTagStyle: CSSProperties = {
-  border: '.5px solid var(--dsw-alias-border-l3)',
-  borderRadius: 'var(--dsw-radius-xs)',
-  color: 'var(--dsw-alias-label-secondary)',
-  flex: 'none',
-  padding: '1px 6px',
-  fontSize: 11,
-  lineHeight: '16px',
-}
 /** models `.rowActions` — the right-aligned control cluster (`margin-left:auto`). */
 const rowActionsStyle: CSSProperties = { alignItems: 'center', gap: 4, marginLeft: 'auto', display: 'inline-flex' }
 /** models `.rowIdentity` metrics on inventory `.cardContent` (a bare toggle button). */
@@ -335,16 +330,38 @@ const hintStyle: CSSProperties = {
 }
 /** models `.rowHead` gap 10 with `.modelRow`'s centred alignment between two field stacks. */
 const fieldRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 10 }
-/** models `.editorHeader` / `.editorTitle`. */
-const editorHeaderStyle: CSSProperties = { alignItems: 'baseline', gap: 8, display: 'flex' }
+/** models `.editorHeader` title side; `space-between` + `flex-start` are the user's instruction. */
+const editorHeaderStyle: CSSProperties = {
+  justifyContent: 'space-between',
+  alignItems: 'flex-start',
+  gap: 8,
+  display: 'flex',
+}
 const editorTitleStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-primary)',
   fontSize: 14,
   fontWeight: 500,
   lineHeight: '22px',
 }
-/** models `.editorActions`. */
-const formActionsStyle: CSSProperties = { justifyContent: 'flex-end', gap: 8, display: 'flex' }
+/** models `.editorActions` — the footer row split so 测试 sits alone on the left. */
+const formActionsStyle: CSSProperties = { justifyContent: 'space-between', alignItems: 'center', display: 'flex' }
+/** models `.editorActions` cluster (`justify-content:flex-end;gap:8px`) on the footer's right. */
+const formActionsEndStyle: CSSProperties = {
+  justifyContent: 'flex-end',
+  alignItems: 'center',
+  gap: 8,
+  marginLeft: 'auto',
+  display: 'flex',
+}
+/** models `.modelInputChoices`, bottom-aligned against the labelled input's 32px box. */
+const checkboxCellStyle: CSSProperties = {
+  flexWrap: 'wrap',
+  alignItems: 'center',
+  gap: 16,
+  minHeight: 32,
+  alignSelf: 'flex-end',
+  display: 'flex',
+}
 /** models `.input` tokens; the kit ships no textarea, so this is the one native control. */
 const textareaStyle: CSSProperties = {
   boxSizing: 'border-box',
@@ -628,9 +645,10 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                 {/*
                  * The title area is the disclosure toggle (inventory
                  * `cardContent` as a bare button): name, then the identity
-                 * chips (transport, status, OAuth) and the chevron. The Switch
-                 * and remove live outside it in `rowActions`, so a collapsed
-                 * card stays operable and clicking a control never toggles.
+                 * chips — status/tools, transport, OAuth — and the chevron.
+                 * The enable Switch lives outside it in `rowActions`, so a
+                 * collapsed card stays toggleable and clicking the Switch never
+                 * toggles the card. 删除 belongs to the inner panel's header.
                  */}
                 <button
                   type="button"
@@ -640,9 +658,9 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                   onClick={() => toggleCard(server.id)}
                 >
                   <span style={rowNameStyle}>{displayName(server)}</span>
-                  <span style={rowTagStyle}>{TRANSPORT_LABELS[server.transport]}</span>
                   <Tag tone={status.tone}>{statusText}</Tag>
-                  {oauth ? <span style={rowTagStyle}>OAuth</span> : null}
+                  <Tag tone="neutral">{TRANSPORT_LABELS[server.transport]}</Tag>
+                  {oauth ? <Tag tone="info">OAuth</Tag> : null}
                   <span style={{ ...chevronWrapStyle, transform: open ? 'rotate(180deg)' : 'none' }}>
                     <IconChevronDownOutlineRegular size={12} />
                   </span>
@@ -656,18 +674,6 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                     disabled={actionsDisabled}
                     onChange={() => toggleEnabled(server)}
                   />
-                  <Tooltip label={server.userManaged ? t('remove') : t('bundleDefined')}>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      style={dangerButtonStyle}
-                      icon={<IconTrashOutlineRegular size={14} />}
-                      onClick={() => requestRemove(server)}
-                      disabled={actionsDisabled}
-                    >
-                      {t('remove')}
-                    </Button>
-                  </Tooltip>
                 </span>
               </div>
 
@@ -681,6 +687,8 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                     probe={probe}
                     probing={probing}
                     onTest={() => testConnection(server)}
+                    onRemove={() => requestRemove(server)}
+                    removeLabel={server.userManaged ? t('remove') : t('bundleDefined')}
                     onCancel={() => closeCard(server.id)}
                     onSaved={() => savedEdit(server.id)}
                   />
@@ -729,8 +737,12 @@ interface ServerFormProps {
   /** Latest probe of this server, shown inside the panel. */
   probe?: McpProbeResult | undefined
   probing?: boolean | undefined
-  /** Edit only: run the connectivity test. */
+  /** Edit only: run the connectivity test (footer, left). */
   onTest?: (() => void) | undefined
+  /** Edit only: open the remove confirmation (panel header, right). */
+  onRemove?: (() => void) | undefined
+  /** Tooltip of the header's remove action: the action, or why the row is bundle-owned. */
+  removeLabel?: string | undefined
   onCancel: () => void
   onSaved: () => void
 }
@@ -865,8 +877,21 @@ function Field({ labelFor, label, hint, children }: {
  * keeps a second copy of the bridge package's schema rules.
  *
  * @param props - form context and callbacks.
+ * @returns the form panel: header row (title + remove), fields, probe line, footer.
  */
-function ServerForm({ t, initial, oauth, busy, probe, probing, onTest, onCancel, onSaved }: ServerFormProps): JSX.Element {
+export function ServerForm({
+  t,
+  initial,
+  oauth,
+  busy,
+  probe,
+  probing,
+  onTest,
+  onRemove,
+  removeLabel,
+  onCancel,
+  onSaved,
+}: ServerFormProps): JSX.Element {
   const editing = initial !== undefined
   const [form, setForm] = useState<FormState>(() => toForm(initial))
   const [fieldErrors, setFieldErrors] = useState<McpFieldErrors>({})
@@ -902,6 +927,20 @@ function ServerForm({ t, initial, oauth, busy, probe, probing, onTest, onCancel,
         <span style={editorTitleStyle}>
           {editing ? t('formEditTitle', { name: initial.serverName }) : t('formAddTitle')}
         </span>
+        {onRemove !== undefined ? (
+          <Tooltip label={removeLabel ?? t('remove')}>
+            <Button
+              variant="ghost"
+              size="sm"
+              style={dangerButtonStyle}
+              icon={<IconTrashOutlineRegular size={14} />}
+              onClick={onRemove}
+              disabled={locked}
+            >
+              {t('remove')}
+            </Button>
+          </Tooltip>
+        ) : null}
       </div>
 
       <div style={fieldRowStyle}>
@@ -1029,7 +1068,7 @@ function ServerForm({ t, initial, oauth, busy, probe, probing, onTest, onCancel,
             onChange={(e) => set('toolCallTimeoutMs', e.target.value.replace(/[^0-9]/g, ''))}
           />
         </Field>
-        <div style={{ ...fieldStyle, justifyContent: 'flex-end' }}>
+        <div style={checkboxCellStyle}>
           <Checkbox
             checked={form.failOnStartupError}
             label={t('fieldFailStartup')}
@@ -1080,18 +1119,20 @@ function ServerForm({ t, initial, oauth, busy, probe, probing, onTest, onCancel,
             {t('test')}
           </Button>
         ) : null}
-        <Button variant="outline" size="sm" onClick={onCancel} disabled={saving}>
-          {t('cancel')}
-        </Button>
-        <Button
-          variant="primary"
-          size="sm"
-          icon={saving ? <StateDot state="ongoing" size={14} /> : undefined}
-          onClick={() => void submit()}
-          disabled={locked}
-        >
-          {editing ? t('save') : t('addMcp')}
-        </Button>
+        <span style={formActionsEndStyle}>
+          <Button variant="outline" size="sm" onClick={onCancel} disabled={saving}>
+            {t('cancel')}
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            icon={saving ? <StateDot state="ongoing" size={14} /> : undefined}
+            onClick={() => void submit()}
+            disabled={locked}
+          >
+            {editing ? t('save') : t('addMcp')}
+          </Button>
+        </span>
       </div>
     </>
   )
