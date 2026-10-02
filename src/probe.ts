@@ -20,13 +20,9 @@ const PROBE_TIMEOUT_MS = 8_000
 /**
  * Run a connectivity probe against the given server config.
  * @param config - resolved server config (transport/url/command/...).
- * @param timeoutMs - hard timeout for connect + list.
  * @returns the probe outcome; never throws.
  */
-export async function probeServer(
-  config: McpServerConfig,
-  timeoutMs: number = PROBE_TIMEOUT_MS,
-): Promise<McpProbeResult> {
+export async function probeServer(config: McpServerConfig): Promise<McpProbeResult> {
   const started = Date.now()
   const client = new Client(
     { name: 'dsh-mcp-manager-probe', version: '0.1.0' },
@@ -39,8 +35,8 @@ export async function probeServer(
   const withTimeout = <T>(promise: Promise<T>): Promise<T> =>
     new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(`probe timed out after ${timeoutMs}ms`))
-      }, timeoutMs)
+        reject(new Error(`probe timed out after ${PROBE_TIMEOUT_MS}ms`))
+      }, PROBE_TIMEOUT_MS)
       promise.then(
         (value) => { clearTimeout(timer); resolve(value) },
         (error) => { clearTimeout(timer); reject(error) },

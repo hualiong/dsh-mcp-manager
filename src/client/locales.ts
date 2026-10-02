@@ -3,6 +3,11 @@
  * locale (zh/en) selects the dictionary automatically; technical identifiers
  * (serverName, transport names, config keys) stay untranslated in both.
  *
+ * Every label the official primitives need (button text, switch name, dialog
+ * copy) is resolved here and passed in — the kit owns no language fallback of
+ * its own. The only error strings that live here are the host failure *codes*
+ * this panel maps to copy; per-field messages are the host's own.
+ *
  * @module dsh-mcp-manager/client/locales
  */
 
@@ -24,7 +29,9 @@ export type McpManagerKeys =
   | 'empty'
   | 'emptyHint'
   | 'patchMissing'
-  | 'removeConfirm'
+  | 'removeTitle'
+  | 'removeDesc'
+  | 'removeAck'
   | 'statusConnected'
   | 'statusActiveNoTools'
   | 'statusFailed'
@@ -38,6 +45,7 @@ export type McpManagerKeys =
   | 'reconnectOff'
   | 'probeOk'
   | 'probeFail'
+  | 'probeSkipped'
   | 'enable'
   | 'disable'
   | 'test'
@@ -58,19 +66,11 @@ export type McpManagerKeys =
   | 'fieldFailStartup'
   | 'cancel'
   | 'save'
-  | 'errIdRequired'
-  | 'errIdPattern'
-  | 'errIdTaken'
-  | 'errNameRequired'
-  | 'errNamePattern'
-  | 'errNameTaken'
-  | 'errUrlRequired'
-  | 'errCommandRequired'
   | 'errDuplicateId'
   | 'errDuplicateName'
   | 'errInvalidConfig'
   | 'errNotFound'
-  | 'errUnknown'
+  | 'errTransport'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -95,8 +95,10 @@ export const zh: McpManagerDict = {
   loading: '正在加载服务器…',
   empty: '尚未配置 MCP 服务器。',
   emptyHint: '点击“添加服务器”开始接入。',
-  patchMissing: '补丁文件缺失：{path}',
-  removeConfirm: '删除 MCP 服务器 “{name}”（{id}）？\n此操作会修改 cordis.patch.yml 并断开其工具。',
+  patchMissing: '补丁文件缺失',
+  removeTitle: '删除 MCP 服务器',
+  removeDesc: '将从 cordis.patch.yml 中删除“{name}”（{id}），并断开它的全部工具。此操作不可恢复。',
+  removeAck: '我了解这会修改 cordis.patch.yml 并断开该服务器的工具',
   statusConnected: '已连接 · {count} 个工具',
   statusActiveNoTools: '未连接 · 无工具',
   statusFailed: '失败',
@@ -108,8 +110,9 @@ export const zh: McpManagerDict = {
   toolCount: '{count} 个工具',
   bundleDefined: 'bundle 定义',
   reconnectOff: '已关闭重连',
-  probeOk: '✓ 已连接，耗时 {ms}ms · {count} 个工具',
-  probeFail: '✗ {error}（{ms}ms）',
+  probeOk: '已连接，耗时 {ms}ms · {count} 个工具',
+  probeFail: '{error}（{ms}ms）',
+  probeSkipped: '未检测',
   enable: '启用',
   disable: '停用',
   test: '测试',
@@ -130,19 +133,11 @@ export const zh: McpManagerDict = {
   fieldFailStartup: '启动失败即报错',
   cancel: '取消',
   save: '保存更改',
-  errIdRequired: '条目 ID 必填',
-  errIdPattern: '需匹配 [A-Za-z0-9_-]{1,64}',
-  errIdTaken: '条目 ID 已被占用',
-  errNameRequired: 'serverName 必填',
-  errNamePattern: '需匹配 [A-Za-z0-9_-]{1,32}',
-  errNameTaken: 'serverName 已被占用',
-  errUrlRequired: 'URL 必填',
-  errCommandRequired: '命令必填',
   errDuplicateId: '条目 ID 已被使用',
   errDuplicateName: 'serverName 已被其他服务器使用',
   errInvalidConfig: 'MCP 服务器配置无效',
   errNotFound: '未找到该 MCP 服务器条目',
-  errUnknown: '操作失败',
+  errTransport: '无法访问主进程',
 }
 
 /** English dictionary. */
@@ -159,8 +154,10 @@ export const en: McpManagerDict = {
   loading: 'Loading servers…',
   empty: 'No MCP servers configured.',
   emptyHint: 'Use “Add server” to connect one.',
-  patchMissing: 'patch file missing: {path}',
-  removeConfirm: 'Remove MCP server "{name}" ({id})?\nThis edits cordis.patch.yml and disconnects its tools.',
+  patchMissing: 'patch file missing',
+  removeTitle: 'Remove MCP server',
+  removeDesc: 'This removes "{name}" ({id}) from cordis.patch.yml and disconnects all of its tools. It cannot be undone.',
+  removeAck: 'I understand this edits cordis.patch.yml and disconnects this server’s tools',
   statusConnected: 'Connected · {count} tools',
   statusActiveNoTools: 'Not connected · no tools',
   statusFailed: 'Failed',
@@ -172,8 +169,9 @@ export const en: McpManagerDict = {
   toolCount: '{count} tools',
   bundleDefined: 'bundle-defined',
   reconnectOff: 'reconnect off',
-  probeOk: '✓ Connected in {ms}ms · {count} tools',
-  probeFail: '✗ {error} ({ms}ms)',
+  probeOk: 'Connected in {ms}ms · {count} tools',
+  probeFail: '{error} ({ms}ms)',
+  probeSkipped: 'Not probed',
   enable: 'Enable',
   disable: 'Disable',
   test: 'Test',
@@ -194,17 +192,9 @@ export const en: McpManagerDict = {
   fieldFailStartup: 'Fail on startup error',
   cancel: 'Cancel',
   save: 'Save changes',
-  errIdRequired: 'Entry id is required',
-  errIdPattern: 'Match [A-Za-z0-9_-]{1,64}',
-  errIdTaken: 'Entry id already in use',
-  errNameRequired: 'serverName is required',
-  errNamePattern: 'Match [A-Za-z0-9_-]{1,32}',
-  errNameTaken: 'serverName already in use',
-  errUrlRequired: 'URL is required',
-  errCommandRequired: 'Command is required',
   errDuplicateId: 'Entry id is already in use',
   errDuplicateName: 'serverName is already used by another server',
   errInvalidConfig: 'Invalid MCP server configuration',
   errNotFound: 'MCP server entry not found',
-  errUnknown: 'Operation failed',
+  errTransport: 'Cannot reach the host',
 }

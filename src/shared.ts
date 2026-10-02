@@ -9,6 +9,21 @@
 /** The package that implements an MCP server bridge in the harness. */
 export const MCP_CLIENT_PACKAGE = '@deepseek-ai/dsh-mcp-client'
 
+/**
+ * OAuth-enabled MCP server bridge. It ships its own config schema
+ * (`serverName`, `url`, `credentialRef`, `scope`, `callbackPort`,
+ * `authorizationTimeoutMs`, …) with no `transport` field, but it publishes its
+ * tools under the same `mcp__<serverName>__*` namespace, so a row owned by it
+ * is an MCP server row like any other.
+ */
+export const MCP_OAUTH_CLIENT_PACKAGE = '@dsh-external/dsh-oauth-mcp-client'
+
+/** Every package the manager recognises as an MCP server bridge. */
+export const MCP_CLIENT_PACKAGES: readonly string[] = [
+  MCP_CLIENT_PACKAGE,
+  MCP_OAUTH_CLIENT_PACKAGE,
+]
+
 /** Logical Connection RPC channel registered by the host half. */
 export const RPC_CHANNEL = '/mcp-manager'
 
@@ -53,12 +68,22 @@ export interface McpServerConfig {
     maxDelayMs?: number
     maxAttempts?: number
   }
+  /** OAuth bridge only: credential reference holding the serialized OAuth state. */
+  credentialRef?: string
+  /** OAuth bridge only: fallback OAuth scope when server metadata declares none. */
+  scope?: string
+  /** OAuth bridge only: loopback callback port (`0` = OS-assigned). */
+  callbackPort?: number
+  /** OAuth bridge only: maximum wait for the browser authorization callback. */
+  authorizationTimeoutMs?: number
 }
 
 /** Full server snapshot the host exposes to the client. */
 export interface McpServerInfo extends McpServerConfig {
-  /** Loader entry id of the mcp-client plugin instance. */
+  /** Loader entry id of the bridge plugin instance. */
   id: string
+  /** Module specifier of the bridge package owning this row, verbatim. */
+  ownerPackage: string
   /** Whether the entry is enabled in the loader composition. */
   enabled: boolean
   /** Current loader fiber phase (undefined entry → null). */
@@ -75,12 +100,11 @@ export interface McpProbeResult {
   latencyMs: number
   toolCount?: number
   error?: string
-}
-
-/** Payload for the `add` / `update` RPC endpoints. */
-export interface McpUpsertPayload {
-  id: string
-  config: McpServerConfig
+  /**
+   * true when no verdict was produced at all — an OAuth-owned row a bare MCP
+   * probe cannot authorize. The UI shows a warning instead of a failure.
+   */
+  skipped?: true
 }
 
 /** RPC endpoints understood by the host channel handler. */
@@ -95,10 +119,3 @@ export type McpEndpoint =
 
 /** Server-side validation errors, keyed by field for inline form display. */
 export type McpFieldErrors = Partial<Record<keyof McpServerConfig | 'id', string>>
-
-/** Host reply envelope for a failed operation. */
-export interface McpOperationError {
-  code: string
-  message: string
-  fields?: McpFieldErrors
-}

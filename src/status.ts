@@ -1,13 +1,14 @@
 /**
  * Loader/tools status enumeration for MCP server instances.
  *
- * Every MCP server is one `@deepseek-ai/dsh-mcp-client` plugin entry in the
- * loader composition. Its lifecycle phase (mirrored from the Cordis FiberState
- * const enum) plus the number of `mcp__<serverName>__*` tools it currently has
- * registered on the tool registry make up the observable "connection status":
- * a server that successfully connected and synchronized its tool list is
- * `active` with `toolCount > 0`; a disabled entry reports `pending`/`null`; a
- * failing server reports `failed`.
+ * Every MCP server is one MCP-bridge plugin entry in the loader composition
+ * (`@deepseek-ai/dsh-mcp-client` or the OAuth bridge
+ * `@dsh-external/dsh-oauth-mcp-client`). Its lifecycle phase (mirrored from the
+ * Cordis FiberState const enum) plus the number of `mcp__<serverName>__*` tools
+ * it currently has registered on the tool registry make up the observable
+ * "connection status": a server that successfully connected and synchronized
+ * its tool list is `active` with `toolCount > 0`; a disabled entry reports
+ * `pending`/`null`; a failing server reports `failed`.
  *
  * @module dsh-mcp-manager/status
  */
@@ -17,21 +18,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import {
-  MCP_CLIENT_PACKAGE,
+  MCP_CLIENT_PACKAGES,
+  MCP_OAUTH_CLIENT_PACKAGE,
   type FiberPhase,
   type McpServerConfig,
   type McpServerInfo,
 } from './shared.ts'
-
-/** Runtime mirror of the cross-package Cordis FiberState const enum. */
-const FIBER_STATE = {
-  PENDING: 0,
-  LOADING: 1,
-  ACTIVE: 2,
-  FAILED: 3,
-  DISPOSED: 4,
-  UNLOADING: 5,
-} as const
 
 /**
  * The composed loader nests every row under the root include group, so tree
@@ -43,22 +35,18 @@ export function normalizeEntryId(id: string): string {
   return id.startsWith('include:') ? id.slice('include:'.length) : id
 }
 
-/** Complete public projection of the Cordis Fiber states. */
-const FIBER_PHASE: Record<number, FiberPhase> = {
-  [FIBER_STATE.PENDING]: 'pending',
-  [FIBER_STATE.LOADING]: 'loading',
-  [FIBER_STATE.ACTIVE]: 'active',
-  [FIBER_STATE.FAILED]: 'failed',
-  [FIBER_STATE.DISPOSED]: null,
-  [FIBER_STATE.UNLOADING]: 'unloading',
-}
+/** Complete public projection of the Cordis Fiber states, by ordinal. */
+const FIBER_PHASE: readonly FiberPhase[] = [
+  'pending', 'loading', 'active', 'failed', null, 'unloading',
+]
 
-/** Normalize a raw mcp-client row config into the shared shape. */
-function toServerConfig(raw: unknown): McpServerConfig {
+/** Normalize a raw bridge row config into the shared shape. */
+export function toServerConfig(raw: unknown, oauth: boolean): McpServerConfig {
   const cfg = (raw ?? {}) as Record<string, unknown>
   return {
     serverName: typeof cfg['serverName'] === 'string' ? cfg['serverName'] : '',
-    transport: cfg['transport'] === 'stdio' ? 'stdio' : 'streamable-http',
+    // The OAuth bridge always speaks streamable-http and has no transport field.
+    transport: oauth ? 'streamable-http' : cfg['transport'] === 'stdio' ? 'stdio' : 'streamable-http',
     url: typeof cfg['url'] === 'string' ? cfg['url'] : undefined,
     command: typeof cfg['command'] === 'string' ? cfg['command'] : undefined,
     args: Array.isArray(cfg['args']) ? (cfg['args'] as string[]) : undefined,
@@ -72,6 +60,12 @@ function toServerConfig(raw: unknown): McpServerConfig {
       ? cfg['failOnStartupError']
       : undefined,
     reconnect: isRecord(cfg['reconnect']) ? cfg['reconnect'] as McpServerConfig['reconnect'] : undefined,
+    credentialRef: typeof cfg['credentialRef'] === 'string' ? cfg['credentialRef'] : undefined,
+    scope: typeof cfg['scope'] === 'string' ? cfg['scope'] : undefined,
+    callbackPort: typeof cfg['callbackPort'] === 'number' ? cfg['callbackPort'] : undefined,
+    authorizationTimeoutMs: typeof cfg['authorizationTimeoutMs'] === 'number'
+      ? cfg['authorizationTimeoutMs']
+      : undefined,
   }
 }
 
@@ -90,18 +84,28 @@ export function countServerTools(ctx: Context, serverName: string): number {
   return count
 }
 
-/** Enumerate every live mcp-client instance with its status projection. */
+/** One live MCP server row resolved by file-level entry id. */
+export interface McpServerEntry {
+  /** Module specifier of the owning bridge package, verbatim. */
+  ownerPackage: string
+  /** Config normalized into the shared shape. */
+  config: McpServerConfig
+}
+
+/** Enumerate every live MCP server instance with its status projection. */
 export function listMcpServers(ctx: Context, userManaged: (id: string) => boolean): McpServerInfo[] {
   const servers: McpServerInfo[] = []
   for (const entry of ctx.loader.entries()) {
     if (entry.options.group) continue
-    if (entry.options.name !== MCP_CLIENT_PACKAGE) continue
-    const config = toServerConfig(entry.options.config)
+    const ownerPackage = entry.options.name
+    if (!MCP_CLIENT_PACKAGES.includes(ownerPackage)) continue
+    const config = toServerConfig(entry.options.config, ownerPackage === MCP_OAUTH_CLIENT_PACKAGE)
     const phase = entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state] ?? null
     const id = normalizeEntryId(entry.id)
     servers.push({
       ...config,
       id,
+      ownerPackage,
       enabled: !entry.disabled,
       fiberPhase: phase,
       toolCount: countServerTools(ctx, config.serverName),
@@ -111,11 +115,27 @@ export function listMcpServers(ctx: Context, userManaged: (id: string) => boolea
   return servers
 }
 
-/** Whether a serverName is already taken by a live mcp-client instance. */
+/** Resolve one MCP server row (owned by any recognised bridge package). */
+export function findMcpServer(ctx: Context, id: string): McpServerEntry | undefined {
+  const wanted = normalizeEntryId(id)
+  for (const entry of ctx.loader.entries()) {
+    if (entry.options.group) continue
+    const ownerPackage = entry.options.name
+    if (!MCP_CLIENT_PACKAGES.includes(ownerPackage)) continue
+    if (normalizeEntryId(entry.id) !== wanted) continue
+    return {
+      ownerPackage,
+      config: toServerConfig(entry.options.config, ownerPackage === MCP_OAUTH_CLIENT_PACKAGE),
+    }
+  }
+  return undefined
+}
+
+/** Whether a serverName is already taken by a live MCP server instance. */
 export function serverNameTaken(ctx: Context, serverName: string, exceptId?: string): boolean {
   for (const entry of ctx.loader.entries()) {
     if (entry.options.group) continue
-    if (entry.options.name !== MCP_CLIENT_PACKAGE) continue
+    if (!MCP_CLIENT_PACKAGES.includes(entry.options.name)) continue
     // Compare file-level ids (tree ids carry the `include:` root prefix).
     if (exceptId !== undefined && normalizeEntryId(entry.id) === exceptId) continue
     const raw = (entry.options.config ?? {}) as Record<string, unknown>

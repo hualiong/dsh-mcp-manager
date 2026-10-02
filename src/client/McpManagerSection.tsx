@@ -3,42 +3,74 @@
  * enable/disable, edit and on-demand connectivity tests. Rendered inside the
  * Settings panel as the "MCP" page (a `settings.section` entry).
  *
- * Copy is fully localized (zh/en) through the shell's locale service and
- * follows the active GUI language automatically. The add form sits at the top
- * of the page; the edit form opens **in place of** the card being edited, and
- * the two modes are mutually exclusive.
+ * Everything interactive here comes from the official component kit
+ * (`@deepseek-ai/dsh-client-ui-primitives`) — Button, Input, Switch, Tag,
+ * StateDot, DisclosureRow, SegmentedControl, Checkbox, Tooltip,
+ * RiskConfirmation, PathLabel and the product icons — so the page wears the
+ * shell's own look and behaviour. The only styles this module owns are inline
+ * layout declarations on its own containers (stack, card, field column, meta
+ * row): the kit ships no layout primitives, and the framework's own rule is
+ * that a card stacking name over description belongs to the feature package.
  *
- * All data flows through the typed RPC client to the host half.
+ * Copy is fully localized (zh/en); the renderer hands the registered `locale:`
+ * namespace's `t` seat in as a prop, so the page follows the active GUI
+ * language without subscribing to locale state itself.
+ *
+ * The add form sits at the top of the page; the edit form opens **in place of**
+ * the card being edited, and the two modes are mutually exclusive. Data flows
+ * through the typed fetch client to the host half; field-level validation
+ * feedback is the host's (`err.fields`), never a second copy of its rules.
  *
  * @module dsh-mcp-manager/client/McpManagerSection
  */
-import { useCallback, useEffect, useMemo, useReducer, useState } from 'react'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// Type-only: pulls `Context { locale }` into the program.
-import type {} from '@deepseek-ai/dsh-client-locale/client'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import type { McpFieldErrors, McpProbeResult, McpServerConfig, McpServerInfo } from '../shared.ts'
-import { callRpc, McpManagerRpcError } from './rpc.ts'
-import { NS } from './locales.ts'
 import {
-  EditIcon,
-  PlugIcon,
-  PlusIcon,
-  PowerIcon,
-  RefreshIcon,
-  ServerIcon,
-  TrashIcon,
-} from './icons.tsx'
+  Button,
+  Checkbox,
+  DisclosureRow,
+  IconCheckCircleFillRegular,
+  IconCodeOutlineRegular,
+  IconEditOutlineRegular,
+  IconGlobeOutlineRegular,
+  IconPlayOutlineRegular,
+  IconPlusOutlineRegular,
+  IconRefreshOutlineRegular,
+  IconTrashOutlineRegular,
+  IconWarningOutlineRegular,
+  Input,
+  PathLabel,
+  RiskConfirmation,
+  SegmentedControl,
+  StateDot,
+  Switch,
+  Tag,
+  Tooltip,
+  type SegmentedControlOption,
+  type StateDotState,
+  type TagTone,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import { MCP_CLIENT_PACKAGE } from '../shared.ts'
+import type {
+  McpFieldErrors,
+  McpProbeResult,
+  McpServerConfig,
+  McpServerInfo,
+  McpTransport,
+} from '../shared.ts'
+import { callRpc, McpManagerRpcError, McpManagerTransportError } from './rpc.ts'
+import { NS } from './locales.ts'
 
+/** Patch-file snapshot shown in the page footer. */
 interface PatchInfo {
   path: string
   exists: boolean
 }
 
-/** Composed props: the settings shell's `close` owner share + injected ctx. */
+/** Composed props: the locale namespace's `t` seat (the section needs nothing else). */
 interface SectionProps {
-  close: () => void
-  ctx: ClientContext
+  t: TranslateNS<typeof NS>
 }
 
 /** Status keys used by the card badge (a subset of the locale dictionary). */
@@ -52,6 +84,119 @@ type StatusKey =
   | 'statusUnloading'
   | 'statusNotLoaded'
 
+/** Card status: the dot's semantic, the tag's palette, and the copy key. */
+interface ServerStatus {
+  dot: StateDotState
+  tone: TagTone
+  key: StatusKey
+  count?: string
+}
+
+/**
+ * Inline layout styles. The kit styles every control; these objects only place
+ * its output (and the multi-line textareas it does not ship) inside the page,
+ * using the same `--dsw-*` tokens the kit reads so both themes stay in step.
+ */
+const sectionStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 12, width: '100%', maxWidth: 720 }
+const headStyle: CSSProperties = { display: 'flex', alignItems: 'baseline', gap: 8 }
+const headTitleStyle: CSSProperties = { fontSize: 16, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }
+const headSubStyle: CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
+const toolbarStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
+const spacerStyle: CSSProperties = { flex: 1 }
+const metaStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
+const metaBadStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
+const errorStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '8px 12px',
+  border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, transparent)',
+  borderRadius: 9,
+  background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent)',
+  color: 'var(--dsw-alias-state-error-primary)',
+  fontSize: 12,
+}
+const cardStyle: CSSProperties = {
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: 12,
+  background: 'var(--dsw-alias-bg-layer-3)',
+  padding: '8px 12px 4px',
+}
+const cardBodyStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10, padding: '2px 0 14px 22px' }
+const statusGroupStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }
+const targetStyle: CSSProperties = {
+  fontSize: 12.5,
+  fontFamily: 'ui-monospace, Consolas, monospace',
+  color: 'var(--dsw-alias-label-secondary)',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+const tagRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }
+const probeStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
+const probeOkStyle: CSSProperties = { color: 'var(--dsw-alias-state-success-primary)', overflowWrap: 'anywhere' }
+const probeBadStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)', overflowWrap: 'anywhere' }
+/** A skipped probe is a stated reason, not a failure: neutral, not red. */
+const probeNoteStyle: CSSProperties = { color: 'var(--dsw-alias-label-secondary)', overflowWrap: 'anywhere' }
+const actionsStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'wrap',
+  borderTop: '1px solid var(--dsw-alias-border-l2)',
+  paddingTop: 10,
+}
+const switchGroupStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 4 }
+const switchLabelStyle: CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }
+const formStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 12,
+  padding: 18,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: 12,
+  background: 'var(--dsw-alias-bg-layer-3)',
+}
+const formTitleStyle: CSSProperties = { fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }
+const fieldStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 0 }
+const labelStyle: CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }
+const hintStyle: CSSProperties = { margin: 0, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' }
+const fieldRowStyle: CSSProperties = { display: 'flex', gap: 10 }
+const formActionsStyle: CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 2 }
+const emptyStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: 6,
+  padding: '36px 16px',
+  fontSize: 13,
+  color: 'var(--dsw-alias-label-tertiary)',
+}
+const footerStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }
+const footerPathStyle: CSSProperties = { fontSize: 11.5, maxWidth: '100%' }
+const dangerButtonStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
+/** A textarea, which the kit does not ship; dressed with the Input tokens. */
+const textareaStyle: CSSProperties = {
+  boxSizing: 'border-box',
+  width: '100%',
+  minHeight: 64,
+  padding: '6px 8px',
+  border: '0.5px solid var(--dsw-alias-border-l4)',
+  borderRadius: 'var(--dsw-radius-md)',
+  background: 'var(--dsw-alias-bg-layer-1)',
+  color: 'var(--dsw-alias-label-primary)',
+  font: 'inherit',
+  fontSize: 13,
+  lineHeight: '20px',
+  resize: 'vertical',
+}
+
+const TRANSPORT_OPTIONS: readonly SegmentedControlOption<McpTransport>[] = [
+  { value: 'streamable-http', label: 'streamable-http' },
+  { value: 'stdio', label: 'stdio' },
+]
+
+/** Map a host/business error (or anything thrown) to localized copy. */
 function errorMessage(error: unknown, t: TranslateNS<typeof NS>): string {
   if (error instanceof McpManagerRpcError) {
     switch (error.code) {
@@ -59,15 +204,17 @@ function errorMessage(error: unknown, t: TranslateNS<typeof NS>): string {
       case 'duplicate-server-name': return t('errDuplicateName')
       case 'invalid-config': return t('errInvalidConfig')
       case 'not-found': return t('errNotFound')
+      // Codes this panel has no copy for fall back to the host's own prose.
       default: return error.message.replace(/^[a-z-]+: /, '')
     }
   }
+  if (error instanceof McpManagerTransportError) return `${t('errTransport')}: ${error.message}`
   return error instanceof Error ? error.message : String(error)
 }
 
 /** Derive the visual status of one server. */
-function statusOf(server: McpServerInfo): { tone: string; key: StatusKey; count?: string } {
-  if (!server.enabled) return { tone: 'off', key: 'statusDisabled' }
+function statusOf(server: McpServerInfo): ServerStatus {
+  if (!server.enabled) return { dot: 'idle', tone: 'neutral', key: 'statusDisabled' }
   switch (server.fiberPhase) {
     case 'active':
       // The fiber being active only means the mcp-client entry is running;
@@ -76,21 +223,22 @@ function statusOf(server: McpServerInfo): { tone: string; key: StatusKey; count?
       // never render green (that would mislead users into thinking the
       // connection is healthy when it failed, e.g. HTTP 401 / crash loop).
       return server.toolCount > 0
-        ? { tone: 'ok', key: 'statusConnected', count: String(server.toolCount) }
-        : { tone: 'warn', key: 'statusActiveNoTools' }
+        ? { dot: 'done', tone: 'success', key: 'statusConnected', count: String(server.toolCount) }
+        : { dot: 'warning', tone: 'warning', key: 'statusActiveNoTools' }
     case 'failed':
-      return { tone: 'bad', key: 'statusFailed' }
+      return { dot: 'error', tone: 'danger', key: 'statusFailed' }
     case 'loading':
-      return { tone: 'warn', key: 'statusLoading' }
+      return { dot: 'ongoing', tone: 'warning', key: 'statusLoading' }
     case 'pending':
-      return { tone: 'warn', key: 'statusPending' }
+      return { dot: 'ongoing', tone: 'warning', key: 'statusPending' }
     case 'unloading':
-      return { tone: 'warn', key: 'statusUnloading' }
+      return { dot: 'ongoing', tone: 'warning', key: 'statusUnloading' }
     default:
-      return { tone: 'off', key: 'statusNotLoaded' }
+      return { dot: 'idle', tone: 'outline', key: 'statusNotLoaded' }
   }
 }
 
+/** One-line transport target: the URL, or the stdio command line. */
 function targetOf(server: McpServerInfo): string {
   if (server.transport === 'stdio') {
     return [server.command, ...(server.args ?? [])].filter(Boolean).join(' ')
@@ -100,95 +248,96 @@ function targetOf(server: McpServerInfo): string {
 
 /**
  * The MCP Manager settings page body.
- * @param props - settings owner `close` + injected client context.
+ * @param props - the locale namespace's translate.
  */
-export function McpManagerSection({ ctx }: SectionProps): JSX.Element {
-  const t = ctx.locale.bind(NS)
-  const [, bump] = useReducer((x: number) => x + 1, 0)
-  useEffect(() => ctx.locale.subscribe(bump), [ctx])
-
+export function McpManagerSection({ t }: SectionProps): JSX.Element {
   const [servers, setServers] = useState<McpServerInfo[]>([])
   const [patchInfo, setPatchInfo] = useState<PatchInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [adding, setAdding] = useState(false)
-  const [editingId, setEditingId] = useState<string | null>(null)
+  const [form, setForm] = useState<FormTarget>(null)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [probes, setProbes] = useState<Record<string, McpProbeResult>>({})
+  const [removing, setRemoving] = useState<McpServerInfo | null>(null)
+  const [acknowledged, setAcknowledged] = useState(false)
 
-  const formOpen = adding || editingId !== null
+  const formOpen = form !== null
   const actionsDisabled = busy !== null || formOpen
 
   const refresh = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const { servers: list } = await callRpc<{ servers: McpServerInfo[] }>(ctx, 'list')
+      const { servers: list } = await callRpc<{ servers: McpServerInfo[] }>('list')
       setServers(list)
-      const { patch } = await callRpc<{ patch: PatchInfo }>(ctx, 'patchInfo')
+      const { patch } = await callRpc<{ patch: PatchInfo }>('patchInfo')
       setPatchInfo(patch)
     } catch (err) {
       setError(errorMessage(err, t))
     } finally {
       setLoading(false)
     }
-  }, [ctx, t])
+  }, [t])
 
   useEffect(() => { void refresh() }, [refresh])
-
-  /** Refresh, then re-poll a few times while the HMR reload settles. */
-  const refreshSettled = useCallback(() => {
-    void refresh()
-    window.setTimeout(() => { void refresh() }, 800)
-    window.setTimeout(() => { void refresh() }, 2400)
-  }, [refresh])
 
   const run = useCallback(async (action: () => Promise<unknown>, label: string) => {
     setBusy(label)
     setError(null)
     try {
       await action()
-      refreshSettled()
+      await refresh()
     } catch (err) {
       setError(errorMessage(err, t))
     } finally {
       setBusy(null)
     }
-  }, [refreshSettled, t])
+  }, [refresh, t])
+
+  const displayName = useCallback(
+    (server: McpServerInfo): string => server.serverName || t('unnamed'),
+    [t],
+  )
 
   const toggleEnabled = useCallback((server: McpServerInfo) => {
     void run(
-      () => callRpc(ctx, 'setEnabled', { id: server.id, enabled: !server.enabled }),
+      () => callRpc('setEnabled', { id: server.id, enabled: !server.enabled }),
       `toggle:${server.id}`,
     )
-  }, [ctx, run])
-
-  const removeServer = useCallback((server: McpServerInfo) => {
-    if (!window.confirm(t('removeConfirm', { name: server.serverName, id: server.id }))) return
-    void run(() => callRpc(ctx, 'remove', { id: server.id }), `remove:${server.id}`)
-  }, [ctx, run, t])
+  }, [run])
 
   const testConnection = useCallback((server: McpServerInfo) => {
     void run(async () => {
-      const result = await callRpc<McpProbeResult>(ctx, 'probe', { id: server.id })
+      const result = await callRpc<McpProbeResult>('probe', { id: server.id })
       setProbes((prev) => ({ ...prev, [server.id]: result }))
     }, `probe:${server.id}`)
-  }, [ctx, run])
+  }, [run])
 
-  const beginAdd = useCallback(() => {
-    setEditingId(null)
-    setAdding(true)
+  const beginAdd = useCallback(() => setForm({ mode: 'add' }), [])
+  const beginEdit = useCallback((server: McpServerInfo) => setForm({ mode: 'edit', server }), [])
+  const closeForm = useCallback(() => setForm(null), [])
+  const toggleExpanded = useCallback((id: string) => {
+    setExpanded((prev) => ({ ...prev, [id]: prev[id] !== true }))
   }, [])
 
-  const closeForms = useCallback(() => {
-    setAdding(false)
-    setEditingId(null)
+  const requestRemove = useCallback((server: McpServerInfo) => {
+    setAcknowledged(false)
+    setRemoving(server)
   }, [])
 
-  const beginEdit = useCallback((server: McpServerInfo) => {
-    setAdding(false)
-    setEditingId(server.id)
-  }, [])
+  const confirmRemove = useCallback(() => {
+    const target = removing
+    if (target === null) return
+    setRemoving(null)
+    void run(() => callRpc('remove', { id: target.id }), `remove:${target.id}`)
+  }, [removing, run])
+
+  /** Shared by both form modes: close the form, then re-read the host list. */
+  const savedForm = useCallback((mode: 'add' | 'edit') => {
+    setForm(null)
+    void run(() => Promise.resolve(), `form:${mode}`)
+  }, [run])
 
   const summary = useMemo(() => {
     const enabled = servers.filter((s) => s.enabled).length
@@ -198,158 +347,235 @@ export function McpManagerSection({ ctx }: SectionProps): JSX.Element {
   }, [servers])
 
   return (
-    <div className="dshmcp-section">
-      <div className="dshmcp-head">
-        <span className="dshmcp-head-title">
-          <ServerIcon size={15} />
-          {t('title')}
-          <span className="dshmcp-head-sub">{t('total', { count: String(summary.total) })}</span>
-        </span>
-        <button type="button" className="dshmcp-iconbtn" title={t('refresh')} onClick={() => void refresh()} disabled={actionsDisabled || loading}>
-          {loading ? <span className="dshmcp-spin" /> : <RefreshIcon size={14} />}
-        </button>
+    <div style={sectionStyle}>
+      <div style={headStyle}>
+        <span style={headTitleStyle}>{t('title')}</span>
+        <span style={headSubStyle}>{t('total', { count: String(summary.total) })}</span>
       </div>
 
-      <div className="dshmcp-toolbar">
-        <button
-          type="button"
-          className="dshmcp-btn dshmcp-btn-primary dshmcp-btn-sm"
+      <div style={toolbarStyle}>
+        <Button
+          variant="primary"
+          size="sm"
+          icon={<IconPlusOutlineRegular size={14} />}
           onClick={beginAdd}
-          disabled={actionsDisabled}
-          title={editingId !== null ? t('formEditTitle', { name: servers.find((s) => s.id === editingId)?.serverName ?? editingId }) : undefined}
+          disabled={busy !== null || formOpen}
         >
-          <PlusIcon size={12} /> {t('addServer')}
-        </button>
-        <span className="dshmcp-spacer" />
-        <span className="dshmcp-meta">
+          {t('addServer')}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          icon={loading ? <StateDot state="ongoing" size={14} /> : <IconRefreshOutlineRegular size={14} />}
+          onClick={() => void refresh()}
+          disabled={busy !== null || loading}
+        >
+          {t('refresh')}
+        </Button>
+        <span style={spacerStyle} />
+        <span style={metaStyle}>
           <span>{t('connected', { count: String(summary.connected) })}</span>
-          {summary.failed > 0 ? <span className="dshmcp-probe-bad">{t('failed', { count: String(summary.failed) })}</span> : null}
+          {summary.failed > 0 ? <span style={metaBadStyle}>{t('failed', { count: String(summary.failed) })}</span> : null}
           <span>{t('enabledOf', { count: String(summary.enabled), total: String(summary.total) })}</span>
         </span>
       </div>
 
-      {error !== null ? <div className="dshmcp-error">{error}</div> : null}
+      {error !== null ? (
+        <div style={errorStyle} role="alert">
+          <IconWarningOutlineRegular size={14} />
+          <span>{error}</span>
+        </div>
+      ) : null}
 
-      {adding ? (
+      {form?.mode === 'add' ? (
         <ServerForm
-          ctx={ctx}
+          key="add"
           t={t}
           initial={undefined}
-          existingIds={new Set(servers.map((s) => s.id))}
-          existingNames={new Set(servers.map((s) => s.serverName))}
           busy={busy !== null}
-          onCancel={closeForms}
-          onSaved={() => {
-            closeForms()
-            void run(() => Promise.resolve(), 'form:add')
-          }}
+          onCancel={closeForm}
+          onSaved={() => savedForm('add')}
         />
       ) : null}
 
-      {loading && servers.length === 0 ? (
-        <div className="dshmcp-empty"><span className="dshmcp-spin" /> {t('loading')}</div>
+      {loading && servers.length === 0 && !formOpen ? (
+        <div style={emptyStyle}>
+          <StateDot state="ongoing" size={14} />
+          <span>{t('loading')}</span>
+        </div>
       ) : null}
 
-      {!loading && servers.length === 0 ? (
-        <div className="dshmcp-empty">
-          {t('empty')}
-          <br />
-          {t('emptyHint')}
+      {!loading && servers.length === 0 && !formOpen ? (
+        <div style={emptyStyle}>
+          <span>{t('empty')}</span>
+          <span>{t('emptyHint')}</span>
         </div>
       ) : null}
 
       {servers.map((server) => {
-        if (server.id === editingId) {
+        if (form?.mode === 'edit' && form.server.id === server.id) {
           return (
             <ServerForm
               key={server.id}
-              ctx={ctx}
               t={t}
               initial={server}
-              existingIds={new Set(servers.map((s) => s.id))}
-              existingNames={new Set(servers.map((s) => s.serverName))}
               busy={busy !== null}
-              onCancel={closeForms}
-              onSaved={() => {
-                closeForms()
-                void run(() => Promise.resolve(), `form:update:${server.id}`)
-              }}
+              onCancel={closeForm}
+              onSaved={() => savedForm('edit')}
             />
           )
         }
+
         const status = statusOf(server)
         const probe = probes[server.id]
+        const probing = busy === `probe:${server.id}`
+        const target = targetOf(server)
         return (
-          <div className="dshmcp-card" key={server.id}>
-            <div className="dshmcp-card-head">
-              <span className={`dshmcp-status dshmcp-status-${status.tone}`}>
-                <span className="dshmcp-status-dot" />
-                {t(status.key, status.count !== undefined ? { count: status.count } : undefined)}
-              </span>
-              <span className="dshmcp-spacer" />
-              <span className="dshmcp-id" title={server.id}>{server.id}</span>
-            </div>
-            <div className="dshmcp-name">{server.serverName || t('unnamed')}</div>
-            <div className="dshmcp-target" title={targetOf(server)}>
-              {targetOf(server) || (server.transport === 'stdio' ? 'stdio' : server.url ?? 'streamable-http')}
-            </div>
-            <div className="dshmcp-meta">
-              <span>{server.transport}</span>
-              <span>{t('toolCount', { count: String(server.toolCount) })}</span>
-              {!server.userManaged ? <span>{t('bundleDefined')}</span> : null}
-              {server.failOnStartupError === true ? <span>{t('fieldFailStartup')}</span> : null}
-              {server.reconnect?.enabled === false ? <span>{t('reconnectOff')}</span> : null}
-            </div>
-            {probe !== undefined ? (
-              <div className={`dshmcp-probe ${probe.ok ? 'dshmcp-probe-ok' : 'dshmcp-probe-bad'}`}>
-                {probe.ok
-                  ? t('probeOk', {
-                      ms: String(probe.latencyMs),
-                      count: probe.toolCount !== undefined ? String(probe.toolCount) : '?',
-                    })
-                  : t('probeFail', { error: probe.error ?? 'failed', ms: String(probe.latencyMs) })}
+          <div style={cardStyle} key={server.id}>
+            <DisclosureRow
+              icon={server.transport === 'stdio'
+                ? <IconCodeOutlineRegular size={16} />
+                : <IconGlobeOutlineRegular size={16} />}
+              title={displayName(server)}
+              open={expanded[server.id] === true}
+              expandable
+              expandOnRowClick
+              running={probing}
+              onToggle={() => toggleExpanded(server.id)}
+              collapsedContent={(
+                <span style={statusGroupStyle}>
+                  <StateDot state={status.dot} size={8} />
+                  <Tag tone={status.tone}>
+                    {t(status.key, status.count !== undefined ? { count: status.count } : undefined)}
+                  </Tag>
+                </span>
+              )}
+            >
+              <div style={cardBodyStyle}>
+                <span style={targetStyle} title={target}>
+                  {target || (server.transport === 'stdio' ? 'stdio' : 'streamable-http')}
+                </span>
+
+                <span style={tagRowStyle}>
+                  <Tag tone="quiet">{server.transport}</Tag>
+                  <Tag tone="quiet">{t('toolCount', { count: String(server.toolCount) })}</Tag>
+                  <Tag tone="outline">{server.id}</Tag>
+                  {!server.userManaged ? <Tag tone="quiet">{t('bundleDefined')}</Tag> : null}
+                  {server.failOnStartupError === true ? <Tag tone="quiet">{t('fieldFailStartup')}</Tag> : null}
+                  {server.reconnect?.enabled === false ? <Tag tone="quiet">{t('reconnectOff')}</Tag> : null}
+                  {server.ownerPackage !== MCP_CLIENT_PACKAGE
+                    ? <Tag tone="info">{server.ownerPackage}</Tag>
+                    : null}
+                </span>
+
+                {probe !== undefined ? (
+                  probe.skipped === true ? (
+                    <span style={probeStyle}>
+                      <Tag tone="warning">{t('probeSkipped')}</Tag>
+                      <span style={probeNoteStyle}>{probe.error ?? ''}</span>
+                    </span>
+                  ) : probe.ok ? (
+                    <span style={probeStyle}>
+                      <IconCheckCircleFillRegular size={14} />
+                      <span style={probeOkStyle}>
+                        {t('probeOk', {
+                          ms: String(probe.latencyMs),
+                          count: probe.toolCount !== undefined ? String(probe.toolCount) : '?',
+                        })}
+                      </span>
+                    </span>
+                  ) : (
+                    <span style={probeStyle}>
+                      <IconWarningOutlineRegular size={14} />
+                      <span style={probeBadStyle}>
+                        {t('probeFail', { error: probe.error ?? 'failed', ms: String(probe.latencyMs) })}
+                      </span>
+                    </span>
+                  )
+                ) : null}
+
+                <span style={actionsStyle}>
+                  <span style={switchGroupStyle}>
+                    <Switch
+                      checked={server.enabled}
+                      label={t('enable')}
+                      disabled={actionsDisabled}
+                      onChange={() => toggleEnabled(server)}
+                    />
+                    <span style={switchLabelStyle}>{server.enabled ? t('disable') : t('enable')}</span>
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={probing ? <StateDot state="ongoing" size={14} /> : <IconPlayOutlineRegular size={14} />}
+                    onClick={() => testConnection(server)}
+                    disabled={actionsDisabled}
+                  >
+                    {t('test')}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<IconEditOutlineRegular size={14} />}
+                    onClick={() => beginEdit(server)}
+                    disabled={actionsDisabled}
+                  >
+                    {t('edit')}
+                  </Button>
+                  <span style={spacerStyle} />
+                  <Tooltip label={server.userManaged ? t('remove') : t('bundleDefined')}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      style={dangerButtonStyle}
+                      icon={<IconTrashOutlineRegular size={14} />}
+                      onClick={() => requestRemove(server)}
+                      disabled={actionsDisabled}
+                    >
+                      {t('remove')}
+                    </Button>
+                  </Tooltip>
+                </span>
               </div>
-            ) : null}
-            <div className="dshmcp-actions">
-              <button type="button" className="dshmcp-btn dshmcp-btn-sm" onClick={() => toggleEnabled(server)} disabled={actionsDisabled}>
-                <PowerIcon size={12} /> {server.enabled ? t('disable') : t('enable')}
-              </button>
-              <button type="button" className="dshmcp-btn dshmcp-btn-sm" onClick={() => testConnection(server)} disabled={actionsDisabled}>
-                {busy === `probe:${server.id}` ? <span className="dshmcp-spin" /> : <PlugIcon size={12} />} {t('test')}
-              </button>
-              <button type="button" className="dshmcp-btn dshmcp-btn-sm" onClick={() => beginEdit(server)} disabled={actionsDisabled}>
-                <EditIcon size={12} /> {t('edit')}
-              </button>
-              <span className="dshmcp-spacer" />
-              <button
-                type="button"
-                className="dshmcp-btn dshmcp-btn-sm dshmcp-btn-danger"
-                onClick={() => removeServer(server)}
-                disabled={actionsDisabled}
-                title={server.userManaged ? t('remove') : t('bundleDefined')}
-              >
-                <TrashIcon size={12} /> {t('remove')}
-              </button>
-            </div>
+            </DisclosureRow>
           </div>
         )
       })}
 
       {patchInfo !== null ? (
-        <div className="dshmcp-footer" title={patchInfo.path}>
-          {patchInfo.exists ? patchInfo.path : t('patchMissing', { path: patchInfo.path })}
+        <div style={footerStyle}>
+          {patchInfo.exists ? null : <Tag tone="warning">{t('patchMissing')}</Tag>}
+          <PathLabel path={patchInfo.path} style={footerPathStyle} />
         </div>
       ) : null}
+
+      <RiskConfirmation
+        open={removing !== null}
+        title={t('removeTitle')}
+        description={t('removeDesc', {
+          name: removing !== null ? displayName(removing) : '',
+          id: removing?.id ?? '',
+        })}
+        acknowledgeLabel={t('removeAck')}
+        cancelLabel={t('cancel')}
+        closeLabel={t('cancel')}
+        confirmLabel={t('remove')}
+        acknowledged={acknowledged}
+        disabled={busy !== null}
+        onAcknowledgedChange={setAcknowledged}
+        onCancel={() => setRemoving(null)}
+        onConfirm={confirmRemove}
+      />
     </div>
   )
 }
 
+/** Which form the page is showing, if any. */
+type FormTarget = { mode: 'add' } | { mode: 'edit'; server: McpServerInfo } | null
+
 interface ServerFormProps {
-  ctx: ClientContext
   t: TranslateNS<typeof NS>
-  initial?: McpServerInfo
-  existingIds: Set<string>
-  existingNames: Set<string>
+  initial?: McpServerInfo | undefined
   busy: boolean
   onCancel: () => void
   onSaved: () => void
@@ -358,7 +584,7 @@ interface ServerFormProps {
 interface FormState {
   id: string
   serverName: string
-  transport: 'stdio' | 'streamable-http'
+  transport: McpTransport
   url: string
   command: string
   argsText: string
@@ -455,12 +681,36 @@ function toConfig(form: FormState): McpServerConfig {
   return config
 }
 
+/** A labelled field: label, control, and the host's validation hint for it. */
+function Field({ labelFor, label, hint, children }: {
+  /** Id of the control this label names; omitted when the control owns no such id. */
+  labelFor?: string | undefined
+  label: string
+  hint?: string | undefined
+  children: ReactNode
+}): JSX.Element {
+  return (
+    <div style={fieldStyle}>
+      {labelFor === undefined
+        ? <span style={labelStyle}>{label}</span>
+        : <label style={labelStyle} htmlFor={labelFor}>{label}</label>}
+      {children}
+      {hint !== undefined ? <p style={hintStyle}>{hint}</p> : null}
+    </div>
+  )
+}
+
 /**
- * Add/edit server form with per-field validation feedback. Localized labels
- * and validation messages; when editing, the id field is locked.
+ * Add/edit server form built from the kit's Input, SegmentedControl, Checkbox
+ * and Button. When editing, the id field is locked.
+ *
+ * Validation is the host's: the submit sends the draft and renders whatever
+ * field errors come back (`McpManagerRpcError.fields`), so the panel never
+ * keeps a second copy of the bridge package's schema rules.
+ *
  * @param props - form context and callbacks.
  */
-function ServerForm({ ctx, t, initial, existingIds, existingNames, busy, onCancel, onSaved }: ServerFormProps): JSX.Element {
+function ServerForm({ t, initial, busy, onCancel, onSaved }: ServerFormProps): JSX.Element {
   const editing = initial !== undefined
   const [form, setForm] = useState<FormState>(() => toForm(initial))
   const [fieldErrors, setFieldErrors] = useState<McpFieldErrors>({})
@@ -471,35 +721,16 @@ function ServerForm({ ctx, t, initial, existingIds, existingNames, busy, onCance
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
-  const validateLocal = (): McpFieldErrors => {
-    const errors: McpFieldErrors = {}
-    if (form.id.trim() === '') errors['id'] = t('errIdRequired')
-    else if (!/^[A-Za-z0-9_-]{1,64}$/.test(form.id.trim())) errors['id'] = t('errIdPattern')
-    else if (!editing && existingIds.has(form.id.trim())) errors['id'] = t('errIdTaken')
-    if (form.serverName.trim() === '') errors['serverName'] = t('errNameRequired')
-    else if (!/^[A-Za-z0-9_-]{1,32}$/.test(form.serverName.trim())) errors['serverName'] = t('errNamePattern')
-    else if (!editing && existingNames.has(form.serverName.trim())) errors['serverName'] = t('errNameTaken')
-    if (form.transport === 'streamable-http' && form.url.trim() === '') errors['url'] = t('errUrlRequired')
-    if (form.transport === 'stdio' && form.command.trim() === '') errors['command'] = t('errCommandRequired')
-    return errors
-  }
-
   const submit = async (): Promise<void> => {
-    const local = validateLocal()
-    setFieldErrors(local)
-    if (Object.keys(local).length > 0) return
     setSaving(true)
     setSubmitError(null)
+    setFieldErrors({})
     try {
       const payload = { id: form.id.trim(), config: toConfig(form) }
-      if (editing) {
-        await callRpc(ctx, 'update', payload)
-      } else {
-        await callRpc(ctx, 'add', payload)
-      }
+      await callRpc(editing ? 'update' : 'add', payload)
       onSaved()
     } catch (err) {
-      if (err instanceof McpManagerRpcError && err.fields !== undefined) setFieldErrors(err.fields)
+      setFieldErrors(err instanceof McpManagerRpcError ? err.fields ?? {} : {})
       setSubmitError(errorMessage(err, t))
     } finally {
       setSaving(false)
@@ -507,176 +738,167 @@ function ServerForm({ ctx, t, initial, existingIds, existingNames, busy, onCance
   }
 
   const err = (key: keyof McpFieldErrors): string | undefined => fieldErrors[key]
-  const inputClass = (key: keyof McpFieldErrors): string =>
-    `dshmcp-input${err(key) !== undefined ? ' dshmcp-input-invalid' : ''}`
+  const locked = saving || busy
 
   return (
-    <div className="dshmcp-form">
-      <div className="dshmcp-form-title">
-        {editing ? t('formEditTitle', { name: initial!.serverName }) : t('formAddTitle')}
-      </div>
+    <div style={formStyle}>
+      <span style={formTitleStyle}>
+        {editing ? t('formEditTitle', { name: initial.serverName }) : t('formAddTitle')}
+      </span>
 
-      <div className="dshmcp-field-row">
-        <div className="dshmcp-field">
-          <label className="dshmcp-label" htmlFor="dshmcp-id">{t('fieldId')}</label>
-          <input
+      <div style={fieldRowStyle}>
+        <Field labelFor="dshmcp-id" label={t('fieldId')} hint={err('id')}>
+          <Input
             id="dshmcp-id"
-            className={inputClass('id')}
             value={form.id}
             placeholder="mcp-github"
             spellCheck={false}
-            disabled={editing || saving || busy}
+            aria-invalid={err('id') !== undefined}
+            disabled={editing || locked}
             onChange={(e) => set('id', e.target.value)}
           />
-          {err('id') !== undefined ? <p className="dshmcp-hint">{err('id')}</p> : null}
-        </div>
-        <div className="dshmcp-field">
-          <label className="dshmcp-label" htmlFor="dshmcp-server">{t('fieldServerName')}</label>
-          <input
+        </Field>
+        <Field labelFor="dshmcp-server" label={t('fieldServerName')} hint={err('serverName')}>
+          <Input
             id="dshmcp-server"
-            className={inputClass('serverName')}
             value={form.serverName}
             placeholder="github"
             spellCheck={false}
-            disabled={saving || busy}
+            aria-invalid={err('serverName') !== undefined}
+            disabled={locked}
             onChange={(e) => set('serverName', e.target.value)}
           />
-          {err('serverName') !== undefined ? <p className="dshmcp-hint">{err('serverName')}</p> : null}
-        </div>
+        </Field>
       </div>
 
-      <div className="dshmcp-field">
-        <label className="dshmcp-label" htmlFor="dshmcp-transport">{t('fieldTransport')}</label>
-        <select
+      <Field label={t('fieldTransport')}>
+        <SegmentedControl
           id="dshmcp-transport"
-          className="dshmcp-select"
           value={form.transport}
-          disabled={saving || busy}
-          onChange={(e) => set('transport', e.target.value as 'stdio' | 'streamable-http')}
-        >
-          <option value="streamable-http">streamable-http</option>
-          <option value="stdio">stdio</option>
-        </select>
-      </div>
+          options={TRANSPORT_OPTIONS}
+          label={t('fieldTransport')}
+          disabled={locked}
+          onChange={(next) => set('transport', next)}
+        />
+      </Field>
 
       {form.transport === 'streamable-http' ? (
-        <div className="dshmcp-field">
-          <label className="dshmcp-label" htmlFor="dshmcp-url">{t('fieldUrl')}</label>
-          <input
+        <Field labelFor="dshmcp-url" label={t('fieldUrl')} hint={err('url')}>
+          <Input
             id="dshmcp-url"
-            className={inputClass('url')}
             value={form.url}
             placeholder="http://127.0.0.1:3000/mcp"
             spellCheck={false}
-            disabled={saving || busy}
+            aria-invalid={err('url') !== undefined}
+            disabled={locked}
             onChange={(e) => set('url', e.target.value)}
           />
-          {err('url') !== undefined ? <p className="dshmcp-hint">{err('url')}</p> : null}
-        </div>
+        </Field>
       ) : (
         <>
-          <div className="dshmcp-field">
-            <label className="dshmcp-label" htmlFor="dshmcp-command">{t('fieldCommand')}</label>
-            <input
+          <Field labelFor="dshmcp-command" label={t('fieldCommand')} hint={err('command')}>
+            <Input
               id="dshmcp-command"
-              className={inputClass('command')}
               value={form.command}
               placeholder="npx"
               spellCheck={false}
-              disabled={saving || busy}
+              aria-invalid={err('command') !== undefined}
+              disabled={locked}
               onChange={(e) => set('command', e.target.value)}
             />
-            {err('command') !== undefined ? <p className="dshmcp-hint">{err('command')}</p> : null}
-          </div>
-          <div className="dshmcp-field">
-            <label className="dshmcp-label" htmlFor="dshmcp-args">{t('fieldArgs')}</label>
+          </Field>
+          <Field labelFor="dshmcp-args" label={t('fieldArgs')} hint={err('args')}>
             <textarea
               id="dshmcp-args"
-              className="dshmcp-input"
+              style={textareaStyle}
               rows={3}
               value={form.argsText}
               placeholder={'-y\n@modelcontextprotocol/server-github'}
               spellCheck={false}
-              disabled={saving || busy}
+              disabled={locked}
               onChange={(e) => set('argsText', e.target.value)}
             />
-          </div>
-          <div className="dshmcp-field">
-            <label className="dshmcp-label" htmlFor="dshmcp-env">{t('fieldEnv')}</label>
+          </Field>
+          <Field labelFor="dshmcp-env" label={t('fieldEnv')} hint={err('env')}>
             <textarea
               id="dshmcp-env"
-              className="dshmcp-input"
+              style={textareaStyle}
               rows={3}
               value={form.envText}
-              placeholder={'GITHUB_TOKEN=ghp_xxx'}
+              placeholder="GITHUB_TOKEN=ghp_xxx"
               spellCheck={false}
-              disabled={saving || busy}
+              disabled={locked}
               onChange={(e) => set('envText', e.target.value)}
             />
-          </div>
-          <div className="dshmcp-field">
-            <label className="dshmcp-label" htmlFor="dshmcp-cwd">{t('fieldCwd')}</label>
-            <input
+          </Field>
+          <Field labelFor="dshmcp-cwd" label={t('fieldCwd')} hint={err('cwd')}>
+            <Input
               id="dshmcp-cwd"
-              className="dshmcp-input"
               value={form.cwd}
               spellCheck={false}
-              disabled={saving || busy}
+              aria-invalid={err('cwd') !== undefined}
+              disabled={locked}
               onChange={(e) => set('cwd', e.target.value)}
             />
-          </div>
+          </Field>
         </>
       )}
 
-      <div className="dshmcp-field">
-        <label className="dshmcp-label" htmlFor="dshmcp-headers">{t('fieldHeaders')}</label>
+      <Field labelFor="dshmcp-headers" label={t('fieldHeaders')} hint={err('headers')}>
         <textarea
           id="dshmcp-headers"
-          className="dshmcp-input"
+          style={textareaStyle}
           rows={2}
           value={form.headersText}
-          placeholder={'Authorization: Bearer xxx'}
+          placeholder="Authorization: Bearer xxx"
           spellCheck={false}
-          disabled={saving || busy}
+          disabled={locked}
           onChange={(e) => set('headersText', e.target.value)}
         />
-      </div>
+      </Field>
 
-      <div className="dshmcp-field-row">
-        <div className="dshmcp-field">
-          <label className="dshmcp-label" htmlFor="dshmcp-timeout">{t('fieldTimeout')}</label>
-          <input
+      <div style={fieldRowStyle}>
+        <Field labelFor="dshmcp-timeout" label={t('fieldTimeout')} hint={err('toolCallTimeoutMs')}>
+          <Input
             id="dshmcp-timeout"
-            className="dshmcp-input"
             value={form.toolCallTimeoutMs}
             inputMode="numeric"
             placeholder="60000"
-            disabled={saving || busy}
+            aria-invalid={err('toolCallTimeoutMs') !== undefined}
+            disabled={locked}
             onChange={(e) => set('toolCallTimeoutMs', e.target.value.replace(/[^0-9]/g, ''))}
           />
-        </div>
-        <div className="dshmcp-field" style={{ justifyContent: 'flex-end' }}>
-          <label className="dshmcp-check">
-            <input
-              type="checkbox"
-              checked={form.failOnStartupError}
-              disabled={saving || busy}
-              onChange={(e) => set('failOnStartupError', e.target.checked)}
-            />
-            {t('fieldFailStartup')}
-          </label>
+        </Field>
+        <div style={{ ...fieldStyle, justifyContent: 'flex-end' }}>
+          <Checkbox
+            checked={form.failOnStartupError}
+            label={t('fieldFailStartup')}
+            disabled={locked}
+            onChange={(next) => set('failOnStartupError', next)}
+          />
         </div>
       </div>
 
-      {submitError !== null ? <div className="dshmcp-error">{submitError}</div> : null}
+      {submitError !== null ? (
+        <div style={errorStyle} role="alert">
+          <IconWarningOutlineRegular size={14} />
+          <span>{submitError}</span>
+        </div>
+      ) : null}
 
-      <div className="dshmcp-form-actions">
-        <button type="button" className="dshmcp-btn dshmcp-btn-sm" onClick={onCancel} disabled={saving}>
+      <div style={formActionsStyle}>
+        <Button variant="outline" size="sm" onClick={onCancel} disabled={saving}>
           {t('cancel')}
-        </button>
-        <button type="button" className="dshmcp-btn dshmcp-btn-sm dshmcp-btn-primary" onClick={() => void submit()} disabled={saving || busy}>
-          {saving ? <span className="dshmcp-spin" /> : null} {editing ? t('save') : t('addServer')}
-        </button>
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          icon={saving ? <StateDot state="ongoing" size={14} /> : undefined}
+          onClick={() => void submit()}
+          disabled={locked}
+        >
+          {editing ? t('save') : t('addServer')}
+        </Button>
       </div>
     </div>
   )

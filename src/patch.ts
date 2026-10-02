@@ -1,10 +1,11 @@
 /**
  * User patch-layer editor for the web profile's `cordis.patch.yml`.
  *
- * MCP servers live as `@deepseek-ai/dsh-mcp-client` plugin entries composed
- * into the loader tree. The user-editable layer is the profile patch file; the
- * harness watches it (HMR) and hot-reloads the tree when it changes, so every
- * edit here is applied live without a restart.
+ * MCP servers live as MCP-bridge plugin entries composed into the loader tree
+ * (`@deepseek-ai/dsh-mcp-client`, or the OAuth bridge
+ * `@dsh-external/dsh-oauth-mcp-client`). The user-editable layer is the profile
+ * patch file; the harness watches it (HMR) and hot-reloads the tree when it
+ * changes, so every edit here is applied live without a restart.
  *
  * The file is a top-level YAML array of loader patch entries in the
  * `cordis-plugin-include` dialect:
@@ -19,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import * as yaml from 'js-yaml'
-import type { McpServerConfig } from './shared.ts'
+import { MCP_CLIENT_PACKAGE, MCP_OAUTH_CLIENT_PACKAGE, type McpServerConfig } from './shared.ts'
 
 /**
  * Mirrors `isJsExpr` from @deepseek-ai/cordis-plugin-loader (the harness's own
@@ -80,6 +81,58 @@ const PATCH_HEADER = `# MCP servers managed by the dsh-mcp-manager plugin.
 # allowed). Edit here, or use the MCP Manager panel in the web GUI.
 `
 
+/**
+ * Config keys each bridge package accepts from the panel's editor. A row is
+ * rewritten from that surface alone, so anything else in an incoming config is
+ * dropped instead of being written into the user's patch file.
+ */
+const PLUGIN_CONFIG_KEYS: Record<string, readonly string[]> = {
+  [MCP_CLIENT_PACKAGE]: [
+    'serverName', 'transport', 'url', 'command', 'args', 'env', 'cwd', 'headers',
+    'toolCallTimeoutMs', 'failOnStartupError', 'reconnect',
+  ],
+  [MCP_OAUTH_CLIENT_PACKAGE]: [
+    'serverName', 'url', 'credentialRef', 'scope', 'headers', 'callbackPort',
+    'authorizationTimeoutMs', 'toolCallTimeoutMs', 'failOnStartupError', 'reconnect',
+  ],
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Project an edited config onto the owning package's schema.
+ *
+ * Every package other than the official client merges over the row's current
+ * config first: the panel's editor does not model `credentialRef`, `scope`,
+ * `callbackPort` or `authorizationTimeoutMs`, and a plain replace would strip
+ * the authorization state reference the OAuth bridge needs. `transport` and the
+ * stdio/http-only keys never reach such a row either, because its schema has no
+ * such field and an unknown key is a load-time config error.
+ */
+function rowConfigFor(
+  ownerPackage: string,
+  config: McpServerConfig,
+  current?: unknown,
+): Record<string, unknown> {
+  const keys = PLUGIN_CONFIG_KEYS[ownerPackage] ?? PLUGIN_CONFIG_KEYS[MCP_CLIENT_PACKAGE]!
+  const incoming = config as unknown as Record<string, unknown>
+  const source = ownerPackage !== MCP_CLIENT_PACKAGE && isRecord(current)
+    ? { ...current, ...incoming }
+    : incoming
+  const out: Record<string, unknown> = {}
+  for (const key of keys) {
+    if (source[key] !== undefined) out[key] = source[key]
+  }
+  // `transport` is a required const in the official schema; a row without one
+  // fails to load.
+  if (ownerPackage === MCP_CLIENT_PACKAGE && out['transport'] === undefined) {
+    out['transport'] = 'streamable-http'
+  }
+  return out
+}
+
 /** Resolve the user patch file for the running profile (config override wins). */
 export function resolvePatchPath(configured?: string): string {
   if (configured !== undefined && configured.trim() !== '') return configured.trim()
@@ -114,13 +167,6 @@ export function editPatchList(
   return next
 }
 
-/** Whether any row (top-level or inside an insert list) carries the id. */
-export function patchHasId(rows: PatchRow[], id: string): boolean {
-  return rows.some((row) =>
-    row.id === id || (Array.isArray(row.insert) && row.insert.some((item) => item['id'] === id)),
-  )
-}
-
 /** Find the in-patch location of an entry id. */
 type Location =
   | { kind: 'row'; row: PatchRow }
@@ -138,6 +184,28 @@ function locate(rows: PatchRow[], id: string): Location {
   return undefined
 }
 
+/** Rewrite one located patch entry (top-level row or insert item) in place. */
+function rewriteLocated(
+  rows: PatchRow[],
+  found: Location,
+  next: (entry: Record<string, unknown>) => Record<string, unknown>,
+): PatchRow[] {
+  if (found === undefined) return rows
+  if (found.kind === 'row') {
+    return rows.map((row) => (row === found.row ? next(row) as PatchRow : row))
+  }
+  return rows.map((row) =>
+    row === found.row
+      ? { ...row, insert: row.insert!.map((item) => (item === found.item ? next(item) : item)) }
+      : row,
+  )
+}
+
+/** The package an existing patch entry names, or the caller's fallback. */
+function ownerPackageOf(entry: Record<string, unknown>, fallback: string): string {
+  return typeof entry['name'] === 'string' ? entry['name'] : fallback
+}
+
 /**
  * Append a new MCP server as an id-less insert row (the only patch form that
  * creates brand-new entries in the composed tree).
@@ -145,7 +213,7 @@ function locate(rows: PatchRow[], id: string): Location {
 export function addMcpRow(rows: PatchRow[], id: string, config: McpServerConfig): PatchRow[] {
   return [
     ...rows,
-    { insert: [{ id, name: '@deepseek-ai/dsh-mcp-client', config }] },
+    { insert: [{ id, name: MCP_CLIENT_PACKAGE, config: rowConfigFor(MCP_CLIENT_PACKAGE, config) }] },
   ]
 }
 
@@ -172,35 +240,20 @@ export function removeMcpRow(rows: PatchRow[], id: string): PatchRow[] {
  * Enable/disable an entry. When the entry is defined in the user patch
  * (top-level or insert item) its own flag flips; otherwise a bundle-defined
  * entry is overridden with a matching `{id, name, disabled}` row (the patch
- * layer later in the stack wins).
+ * layer later in the stack wins). The synthesized override must repeat the
+ * entry's real owner package: a name mismatch makes the loader skip the row.
  */
 export function setMcpEnabled(
   rows: PatchRow[],
   id: string,
   enabled: boolean,
+  fallbackPackage: string = MCP_CLIENT_PACKAGE,
 ): PatchRow[] {
   const found = locate(rows, id)
   if (found === undefined) {
-    return [...rows, { id, name: '@deepseek-ai/dsh-mcp-client', disabled: !enabled }]
+    return [...rows, { id, name: fallbackPackage, disabled: !enabled }]
   }
-  if (found.kind === 'row') {
-    return rows.map((row) =>
-      row === found.row
-        ? { ...row, disabled: enabled ? false : true }
-        : row,
-    )
-  }
-  const item = found.item
-  return rows.map((row) =>
-    row === found.row
-      ? {
-          ...row,
-          insert: row.insert!.map((entry) =>
-            entry === item ? { ...entry, disabled: enabled ? false : true } : entry,
-          ),
-        }
-      : row,
-  )
+  return rewriteLocated(rows, found, (entry) => ({ ...entry, disabled: !enabled }))
 }
 
 /**
@@ -211,28 +264,23 @@ export function updateMcpConfig(
   rows: PatchRow[],
   id: string,
   config: McpServerConfig,
+  fallbackPackage: string = MCP_CLIENT_PACKAGE,
 ): PatchRow[] {
   const found = locate(rows, id)
   if (found === undefined) {
-    return [...rows, { id, name: '@deepseek-ai/dsh-mcp-client', config }]
+    return [
+      ...rows,
+      { id, name: fallbackPackage, config: rowConfigFor(fallbackPackage, config) },
+    ]
   }
-  if (found.kind === 'row') {
-    return rows.map((row) => (row === found.row ? { ...row, config } : row))
-  }
-  const item = found.item
-  return rows.map((row) =>
-    row === found.row
-      ? {
-          ...row,
-          insert: row.insert!.map((entry) =>
-            entry === item ? { ...entry, config } : entry,
-          ),
-        }
-      : row,
-  )
+  const current = found.kind === 'row' ? found.row : found.item
+  return rewriteLocated(rows, found, (entry) => ({
+    ...entry,
+    config: rowConfigFor(ownerPackageOf(entry, fallbackPackage), config, current.config),
+  }))
 }
 
 /** Whether an entry id is present in the user patch (removable/editable). */
-export function isUserManaged(rows: PatchRow[], id: string): boolean {
-  return patchHasId(rows, id)
+export function patchHasId(rows: PatchRow[], id: string): boolean {
+  return locate(rows, id) !== undefined
 }
