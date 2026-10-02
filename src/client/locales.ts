@@ -32,7 +32,6 @@ export type McpManagerKeys =
   | 'removeTitle'
   | 'removeDesc'
   | 'removeAck'
-  | 'statusConnected'
   | 'statusActiveNoTools'
   | 'statusFailed'
   | 'statusDisabled'
@@ -42,14 +41,12 @@ export type McpManagerKeys =
   | 'statusNotLoaded'
   | 'toolCount'
   | 'bundleDefined'
-  | 'reconnectOff'
   | 'probeOk'
   | 'probeFail'
   | 'probeSkipped'
   | 'enable'
   | 'disable'
   | 'test'
-  | 'edit'
   | 'remove'
   | 'formAddTitle'
   | 'formEditTitle'
@@ -99,8 +96,7 @@ export const zh: McpManagerDict = {
   removeTitle: '删除 MCP 服务器',
   removeDesc: '将从 cordis.patch.yml 中删除“{name}”（{id}），并断开它的全部工具。此操作不可恢复。',
   removeAck: '我了解这会修改 cordis.patch.yml 并断开该服务器的工具',
-  statusConnected: '已连接 · {count} 个工具',
-  statusActiveNoTools: '未连接 · 无工具',
+  statusActiveNoTools: '无工具',
   statusFailed: '失败',
   statusDisabled: '已停用',
   statusLoading: '加载中',
@@ -109,14 +105,12 @@ export const zh: McpManagerDict = {
   statusNotLoaded: '未加载',
   toolCount: '{count} 个工具',
   bundleDefined: 'bundle 定义',
-  reconnectOff: '已关闭重连',
   probeOk: '已连接，耗时 {ms}ms · {count} 个工具',
   probeFail: '{error}（{ms}ms）',
   probeSkipped: '未检测',
   enable: '启用',
   disable: '停用',
   test: '测试',
-  edit: '编辑',
   remove: '删除',
   formAddTitle: '添加 MCP 服务器',
   formEditTitle: '编辑 {name}',
@@ -132,7 +126,7 @@ export const zh: McpManagerDict = {
   fieldTimeout: '超时（毫秒，可选）',
   fieldFailStartup: '启动失败即报错',
   cancel: '取消',
-  save: '保存更改',
+  save: '保存',
   errDuplicateId: '条目 ID 已被使用',
   errDuplicateName: 'serverName 已被其他服务器使用',
   errInvalidConfig: 'MCP 服务器配置无效',
@@ -158,8 +152,7 @@ export const en: McpManagerDict = {
   removeTitle: 'Remove MCP server',
   removeDesc: 'This removes "{name}" ({id}) from cordis.patch.yml and disconnects all of its tools. It cannot be undone.',
   removeAck: 'I understand this edits cordis.patch.yml and disconnects this server’s tools',
-  statusConnected: 'Connected · {count} tools',
-  statusActiveNoTools: 'Not connected · no tools',
+  statusActiveNoTools: 'No tools',
   statusFailed: 'Failed',
   statusDisabled: 'Disabled',
   statusLoading: 'Loading',
@@ -168,14 +161,12 @@ export const en: McpManagerDict = {
   statusNotLoaded: 'Not loaded',
   toolCount: '{count} tools',
   bundleDefined: 'bundle-defined',
-  reconnectOff: 'reconnect off',
   probeOk: 'Connected in {ms}ms · {count} tools',
   probeFail: '{error} ({ms}ms)',
   probeSkipped: 'Not probed',
   enable: 'Enable',
   disable: 'Disable',
   test: 'Test',
-  edit: 'Edit',
   remove: 'Remove',
   formAddTitle: 'Add MCP server',
   formEditTitle: 'Edit {name}',
@@ -191,7 +182,7 @@ export const en: McpManagerDict = {
   fieldTimeout: 'Timeout (ms, optional)',
   fieldFailStartup: 'Fail on startup error',
   cancel: 'Cancel',
-  save: 'Save changes',
+  save: 'Save',
   errDuplicateId: 'Entry id is already in use',
   errDuplicateName: 'serverName is already used by another server',
   errInvalidConfig: 'Invalid MCP server configuration',

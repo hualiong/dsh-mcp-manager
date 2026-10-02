@@ -6,18 +6,25 @@
  * Layout and typography mirror the official settings pages. The card is the
  * 模型 page's configured-row structure — `rowCard` / `rowHead` / `rowIdentity`
  * / `rowName` / `rowTag` / `rowActions`
- * (`.recon/official/settings-models.client.js`) — with the disclosure
- * mechanics of the plugin-inventory card (`cardContent` toggle, chevron at
- * `data-open` rotation, `cardDetails` panel;
- * `.recon/official/settings-plugin-inventory.client.js`). Every number and
- * token below is copied from those bundles; each style constant names the
- * official rule it reproduces.
+ * (`.recon/official/settings-models.client.js`) — with the plugin-inventory
+ * card's disclosure mechanics for the title toggle and chevron
+ * (`.recon/official/settings-plugin-inventory.client.js`), and the header row
+ * + toolbar of the plugin page (`.recon/official/plugin-manager.client.js`).
+ * Every number and token below is copied from those bundles; each style
+ * constant names the official rule it reproduces, and deliberate departures
+ * are called out where they happen.
+ *
+ * The card header carries the whole identity — name, transport chip, status
+ * chip, OAuth chip, chevron — plus the enable Switch and the remove action, so
+ * a collapsed card is still fully operable. Expanding a card IS editing it:
+ * the disclosure panel mounts the edit form directly (there is no read-only
+ * body left to show), and the form's footer holds [测试][取消][保存].
  *
  * The transcript-facing `DisclosureRow` primitive is deliberately NOT used:
  * its contract is a 24px tertiary process row, so it cannot carry the
  * settings-page title scale or host the row's controls.
  *
- * Controls still come from the official kit
+ * Controls come from the official kit
  * (`@deepseek-ai/dsh-client-ui-primitives`): Button (`md` = the page's 36px
  * actions, `sm` = the row's 28px actions), Input, Switch, Tag, StateDot,
  * SegmentedControl, Checkbox, Tooltip, RiskConfirmation, PathLabel and the
@@ -53,7 +60,7 @@ import {
   type StateDotState,
   type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { MCP_CLIENT_PACKAGE } from '../shared.ts'
+import { MCP_OAUTH_CLIENT_PACKAGE } from '../shared.ts'
 import type {
   McpFieldErrors,
   McpProbeResult,
@@ -75,9 +82,12 @@ interface SectionProps {
   t: TranslateNS<typeof NS>
 }
 
-/** Status keys used by the card badge (a subset of the locale dictionary). */
+/**
+ * Status keys used by the card badge. A connected server reports the tool count
+ * itself, so that case reuses the `toolCount` sentence.
+ */
 type StatusKey =
-  | 'statusConnected'
+  | 'toolCount'
   | 'statusActiveNoTools'
   | 'statusFailed'
   | 'statusDisabled'
@@ -94,11 +104,22 @@ interface ServerStatus {
   count?: string
 }
 
+/** Transport names as the header chip and the form's selector both read them. */
+const TRANSPORT_LABELS: Record<McpTransport, string> = {
+  stdio: 'STDIO',
+  'streamable-http': 'Streamable HTTP',
+}
+
+const TRANSPORT_OPTIONS: readonly SegmentedControlOption<McpTransport>[] = [
+  { value: 'streamable-http', label: TRANSPORT_LABELS['streamable-http'] },
+  { value: 'stdio', label: TRANSPORT_LABELS.stdio },
+]
+
 // --- official values -----------------------------------------------------------------
 // `models` = ModelsSection.module.css inside .recon/official/settings-models.client.js
 // `inventory` = PluginInventorySettingsTab.module.css inside
 //   .recon/official/settings-plugin-inventory.client.js
-// `general` = settings-general.client.js
+// `manager` = plugin-manager.client.js, `general` = settings-general.client.js
 
 /** models `.section` — the settings page column. */
 const sectionStyle: CSSProperties = {
@@ -116,17 +137,18 @@ const titleStyle: CSSProperties = {
   fontWeight: 500,
   lineHeight: '24px',
 }
-/** models `.intro` — the summary sentence under the heading. */
+/** plugin-manager `.pageIntro` margin on the models `.intro` scale. */
 const introStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-tertiary)',
-  margin: 0,
+  margin: '4px 0 0',
   fontSize: 14,
   lineHeight: '22px',
 }
-/** plugin-manager `.pageHead` — heading block left, toolbar right (its `padding-top:28px` is page chrome). */
+/** plugin-manager `.pageHead` layout; `align-items` is `center` by explicit user instruction
+ * (the official rule is `flex-start`), so the toolbar centres against the two-line heading. */
 const pageHeadStyle: CSSProperties = {
   justifyContent: 'space-between',
-  alignItems: 'flex-start',
+  alignItems: 'center',
   gap: 16,
   display: 'flex',
 }
@@ -197,7 +219,7 @@ const addCardStyle: CSSProperties = {
   listStyle: 'none',
   display: 'flex',
 }
-/** models `.editor` — the nested edit panel inside a row card. */
+/** models `.editor` — the panel an expanded card opens into. */
 const editorStyle: CSSProperties = {
   borderRadius: 'var(--dsw-radius-lg)',
   background: 'var(--dsw-alias-bg-module-platform)',
@@ -227,6 +249,16 @@ const rowNameStyle: CSSProperties = {
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 }
+/** models `.rowTag` — the identity chips beside the name (transport, OAuth). */
+const rowTagStyle: CSSProperties = {
+  border: '.5px solid var(--dsw-alias-border-l3)',
+  borderRadius: 'var(--dsw-radius-xs)',
+  color: 'var(--dsw-alias-label-secondary)',
+  flex: 'none',
+  padding: '1px 6px',
+  fontSize: 11,
+  lineHeight: '16px',
+}
 /** models `.rowActions` — the right-aligned control cluster (`margin-left:auto`). */
 const rowActionsStyle: CSSProperties = { alignItems: 'center', gap: 4, marginLeft: 'auto', display: 'inline-flex' }
 /** models `.rowIdentity` metrics on inventory `.cardContent` (a bare toggle button). */
@@ -254,22 +286,6 @@ const chevronWrapStyle: CSSProperties = {
 }
 /** inventory `.phaseDot` — the status dot's own slot. */
 const dotSlotStyle: CSSProperties = { flex: 'none', display: 'inline-flex' }
-/** inventory `.entryValue` code face on the `.cardDescription` 12/18 colour. */
-const targetStyle: CSSProperties = {
-  fontFamily: 'var(--ds-font-family-code)',
-  fontSize: 12,
-  lineHeight: '18px',
-  color: 'var(--dsw-alias-label-tertiary)',
-  overflowWrap: 'anywhere',
-  display: 'block',
-}
-/** inventory `.statusWithDot` + models `.modelInputChoices` wrapping (row spacing = `.editor` gap). */
-const metaRowStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  flexWrap: 'wrap',
-}
 /** inventory `.statusWithDot` (plus `.status,.failure`'s `margin:0`). */
 const statusLineStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 6, margin: 0 }
 /** inventory `.status` — the probe sentence. */
@@ -347,11 +363,6 @@ const textareaStyle: CSSProperties = {
 /** models `.dangerButton` colour on the kit's ghost button. */
 const dangerButtonStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
 
-const TRANSPORT_OPTIONS: readonly SegmentedControlOption<McpTransport>[] = [
-  { value: 'streamable-http', label: 'streamable-http' },
-  { value: 'stdio', label: 'stdio' },
-]
-
 /** Map a host/business error (or anything thrown) to localized copy. */
 function errorMessage(error: unknown, t: TranslateNS<typeof NS>): string {
   if (error instanceof McpManagerRpcError) {
@@ -375,11 +386,12 @@ function statusOf(server: McpServerInfo): ServerStatus {
     case 'active':
       // The fiber being active only means the mcp-client entry is running;
       // the MCP handshake succeeded only when tools are actually registered.
-      // With zero tools the server is effectively not connected, so it must
-      // never render green (that would mislead users into thinking the
-      // connection is healthy when it failed, e.g. HTTP 401 / crash loop).
+      // A connected server reports its tool count alone; with zero tools the
+      // server is effectively not connected, so it must never render green
+      // (that would mislead users into thinking the connection is healthy
+      // when it failed, e.g. HTTP 401 / crash loop).
       return server.toolCount > 0
-        ? { dot: 'done', tone: 'success', key: 'statusConnected', count: String(server.toolCount) }
+        ? { dot: 'done', tone: 'success', key: 'toolCount', count: String(server.toolCount) }
         : { dot: 'warning', tone: 'warning', key: 'statusActiveNoTools' }
     case 'failed':
       return { dot: 'error', tone: 'danger', key: 'statusFailed' }
@@ -394,14 +406,6 @@ function statusOf(server: McpServerInfo): ServerStatus {
   }
 }
 
-/** One-line transport target: the URL, or the stdio command line. */
-function targetOf(server: McpServerInfo): string {
-  if (server.transport === 'stdio') {
-    return [server.command, ...(server.args ?? [])].filter(Boolean).join(' ')
-  }
-  return server.url ?? ''
-}
-
 /**
  * The MCP Manager settings page body.
  * @param props - the locale namespace's translate.
@@ -411,14 +415,15 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   const [patchInfo, setPatchInfo] = useState<PatchInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [form, setForm] = useState<FormTarget>(null)
+  const [adding, setAdding] = useState(false)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [probes, setProbes] = useState<Record<string, McpProbeResult>>({})
   const [removing, setRemoving] = useState<McpServerInfo | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
 
-  const formOpen = form !== null
+  const anyExpanded = Object.values(expanded).some((open) => open === true)
+  const formOpen = adding || anyExpanded
   const actionsDisabled = busy !== null || formOpen
 
   const refresh = useCallback(async () => {
@@ -470,10 +475,12 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     }, `probe:${server.id}`)
   }, [run])
 
-  const beginAdd = useCallback(() => setForm({ mode: 'add' }), [])
-  const beginEdit = useCallback((server: McpServerInfo) => setForm({ mode: 'edit', server }), [])
-  const closeForm = useCallback(() => setForm(null), [])
-  const toggleExpanded = useCallback((id: string) => {
+  const beginAdd = useCallback(() => setAdding(true), [])
+  const closeAdd = useCallback(() => setAdding(false), [])
+  const closeCard = useCallback((id: string) => {
+    setExpanded((prev) => ({ ...prev, [id]: false }))
+  }, [])
+  const toggleCard = useCallback((id: string) => {
     setExpanded((prev) => ({ ...prev, [id]: prev[id] !== true }))
   }, [])
 
@@ -489,11 +496,17 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     void run(() => callRpc('remove', { id: target.id }), `remove:${target.id}`)
   }, [removing, run])
 
-  /** Shared by both form modes: close the form, then re-read the host list. */
-  const savedForm = useCallback((mode: 'add' | 'edit') => {
-    setForm(null)
-    void run(() => Promise.resolve(), `form:${mode}`)
+  /** The add card saved: close it, then re-read the host list. */
+  const savedAdd = useCallback(() => {
+    setAdding(false)
+    void run(() => Promise.resolve(), 'form:add')
   }, [run])
+
+  /** A card's form saved: collapse the card, then re-read the host list. */
+  const savedEdit = useCallback((id: string) => {
+    closeCard(id)
+    void run(() => Promise.resolve(), `form:update:${id}`)
+  }, [closeCard, run])
 
   const summary = useMemo(() => {
     const enabled = servers.filter((s) => s.enabled).length
@@ -518,10 +531,10 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
       {/*
        * The 插件页 header: heading block on the left, `.toolbar` at the right
        * edge of the same row. Refresh is the kit's ghost Button wearing the
-       * official icon-button box (so hover comes from the kit's own
-       * `.ghost:hover` token and focus from the platform), with the kit
-       * Tooltip, the glyph swap while refreshing, and the add action as the
-       * kit's primary Button wearing `.addButton` metrics.
+       * official icon-button box (hover from the kit's own `.ghost:hover`
+       * token, focus from the platform), with the kit Tooltip, the glyph swap
+       * while refreshing, and the add action as the kit's primary Button
+       * wearing `.addButton` metrics.
        */}
       <header style={pageHeadStyle}>
         <div style={titleBlockStyle}>
@@ -581,15 +594,15 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
       ) : null}
 
       <ul style={rowsStyle}>
-        {form?.mode === 'add' ? (
+        {adding ? (
           <li style={addCardStyle} key="add">
             <div style={nestedEditorStyle}>
               <ServerForm
                 t={t}
                 initial={undefined}
                 busy={busy !== null}
-                onCancel={closeForm}
-                onSaved={() => savedForm('add')}
+                onCancel={closeAdd}
+                onSaved={savedAdd}
               />
             </div>
           </li>
@@ -598,13 +611,12 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
         {servers.map((server) => {
           const status = statusOf(server)
           const statusText = t(status.key, status.count !== undefined ? { count: status.count } : undefined)
-          const editing = form?.mode === 'edit' && form.server.id === server.id
           const open = expanded[server.id] === true
           const probe = probes[server.id]
           const probing = busy === `probe:${server.id}`
           const failed = server.enabled && server.fiberPhase === 'failed'
+          const oauth = server.ownerPackage === MCP_OAUTH_CLIENT_PACKAGE
           const regionId = `mcp-details-${server.id}`
-          const target = targetOf(server)
           return (
             <li
               style={failed ? rowCardFailedStyle : open ? rowCardOpenStyle : rowCardStyle}
@@ -615,20 +627,22 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
               <div style={rowHeadStyle}>
                 {/*
                  * The title area is the disclosure toggle (inventory
-                 * `cardContent` as a bare button), so the title keeps the
-                 * settings-page scale. Only the enable Switch shares the
-                 * header: it has to stay reachable while the card is
-                 * collapsed. Everything else lives in the expanded panel.
+                 * `cardContent` as a bare button): name, then the identity
+                 * chips (transport, status, OAuth) and the chevron. The Switch
+                 * and remove live outside it in `rowActions`, so a collapsed
+                 * card stays operable and clicking a control never toggles.
                  */}
                 <button
                   type="button"
                   style={rowToggleStyle}
                   aria-expanded={open}
                   aria-controls={open ? regionId : undefined}
-                  onClick={() => toggleExpanded(server.id)}
+                  onClick={() => toggleCard(server.id)}
                 >
                   <span style={rowNameStyle}>{displayName(server)}</span>
+                  <span style={rowTagStyle}>{TRANSPORT_LABELS[server.transport]}</span>
                   <Tag tone={status.tone}>{statusText}</Tag>
+                  {oauth ? <span style={rowTagStyle}>OAuth</span> : null}
                   <span style={{ ...chevronWrapStyle, transform: open ? 'rotate(180deg)' : 'none' }}>
                     <IconChevronDownOutlineRegular size={12} />
                   </span>
@@ -642,94 +656,34 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                     disabled={actionsDisabled}
                     onChange={() => toggleEnabled(server)}
                   />
+                  <Tooltip label={server.userManaged ? t('remove') : t('bundleDefined')}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      style={dangerButtonStyle}
+                      icon={<IconTrashOutlineRegular size={14} />}
+                      onClick={() => requestRemove(server)}
+                      disabled={actionsDisabled}
+                    >
+                      {t('remove')}
+                    </Button>
+                  </Tooltip>
                 </span>
               </div>
 
-              {editing ? (
-                <div style={editorStyle}>
+              {open ? (
+                <div style={editorStyle} id={regionId}>
                   <ServerForm
                     t={t}
                     initial={server}
+                    oauth={oauth}
                     busy={busy !== null}
-                    onCancel={closeForm}
-                    onSaved={() => savedForm('edit')}
+                    probe={probe}
+                    probing={probing}
+                    onTest={() => testConnection(server)}
+                    onCancel={() => closeCard(server.id)}
+                    onSaved={() => savedEdit(server.id)}
                   />
-                </div>
-              ) : open ? (
-                <div style={editorStyle} id={regionId}>
-                  <span style={targetStyle} title={target}>
-                    {target || (server.transport === 'stdio' ? 'stdio' : 'streamable-http')}
-                  </span>
-
-                  <span style={metaRowStyle}>
-                    <Tag tone="quiet">{server.transport}</Tag>
-                    <Tag tone="quiet">{t('toolCount', { count: String(server.toolCount) })}</Tag>
-                    {!server.userManaged ? <Tag tone="quiet">{t('bundleDefined')}</Tag> : null}
-                    {server.failOnStartupError === true ? <Tag tone="quiet">{t('fieldFailStartup')}</Tag> : null}
-                    {server.reconnect?.enabled === false ? <Tag tone="quiet">{t('reconnectOff')}</Tag> : null}
-                    {server.ownerPackage !== MCP_CLIENT_PACKAGE
-                      ? <Tag tone="info">{server.ownerPackage}</Tag>
-                      : null}
-                  </span>
-
-                  {probe !== undefined ? (
-                    probe.skipped === true ? (
-                      <p style={statusLineStyle}>
-                        <span style={dotSlotStyle}><StateDot state="warning" size={10} /></span>
-                        <span style={statusTextStyle}>{t('probeSkipped')} {probe.error ?? ''}</span>
-                      </p>
-                    ) : probe.ok ? (
-                      <p style={statusLineStyle}>
-                        <span style={dotSlotStyle}><StateDot state="done" size={10} /></span>
-                        <span style={statusTextStyle}>
-                          {t('probeOk', {
-                            ms: String(probe.latencyMs),
-                            count: probe.toolCount !== undefined ? String(probe.toolCount) : '?',
-                          })}
-                        </span>
-                      </p>
-                    ) : (
-                      <p style={statusLineStyle}>
-                        <span style={dotSlotStyle}><StateDot state="error" size={10} /></span>
-                        <span style={failureStyle}>
-                          {t('probeFail', { error: probe.error ?? 'failed', ms: String(probe.latencyMs) })}
-                        </span>
-                      </p>
-                    )
-                  ) : null}
-
-                  {/* models `.editorActions` — the row's actions, right-aligned at the panel foot. */}
-                  <div style={formActionsStyle}>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      icon={probing ? <StateDot state="ongoing" size={14} /> : undefined}
-                      onClick={() => testConnection(server)}
-                      disabled={actionsDisabled}
-                    >
-                      {t('test')}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => beginEdit(server)}
-                      disabled={actionsDisabled}
-                    >
-                      {t('edit')}
-                    </Button>
-                    <Tooltip label={server.userManaged ? t('remove') : t('bundleDefined')}>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        style={dangerButtonStyle}
-                        icon={<IconTrashOutlineRegular size={14} />}
-                        onClick={() => requestRemove(server)}
-                        disabled={actionsDisabled}
-                      >
-                        {t('remove')}
-                      </Button>
-                    </Tooltip>
-                  </div>
                 </div>
               ) : null}
             </li>
@@ -765,13 +719,18 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   )
 }
 
-/** Which form the page is showing, if any. */
-type FormTarget = { mode: 'add' } | { mode: 'edit'; server: McpServerInfo } | null
-
 interface ServerFormProps {
   t: TranslateNS<typeof NS>
+  /** Absent for the add form; the row being edited otherwise. */
   initial?: McpServerInfo | undefined
+  /** The row is owned by the OAuth bridge: its transport is fixed, so the selector is hidden. */
+  oauth?: boolean | undefined
   busy: boolean
+  /** Latest probe of this server, shown inside the panel. */
+  probe?: McpProbeResult | undefined
+  probing?: boolean | undefined
+  /** Edit only: run the connectivity test. */
+  onTest?: (() => void) | undefined
   onCancel: () => void
   onSaved: () => void
 }
@@ -897,7 +856,9 @@ function Field({ labelFor, label, hint, children }: {
 
 /**
  * Add/edit server form built from the kit's Input, SegmentedControl, Checkbox
- * and Button. When editing, the id field is locked.
+ * and Button. When editing, the id field is locked and the footer carries the
+ * connectivity test; the transport selector is hidden for OAuth-owned rows,
+ * whose transport is fixed and whose other keys the host merges.
  *
  * Validation is the host's: the submit sends the draft and renders whatever
  * field errors come back (`McpManagerRpcError.fields`), so the panel never
@@ -905,7 +866,7 @@ function Field({ labelFor, label, hint, children }: {
  *
  * @param props - form context and callbacks.
  */
-function ServerForm({ t, initial, busy, onCancel, onSaved }: ServerFormProps): JSX.Element {
+function ServerForm({ t, initial, oauth, busy, probe, probing, onTest, onCancel, onSaved }: ServerFormProps): JSX.Element {
   const editing = initial !== undefined
   const [form, setForm] = useState<FormState>(() => toForm(initial))
   const [fieldErrors, setFieldErrors] = useState<McpFieldErrors>({})
@@ -968,16 +929,18 @@ function ServerForm({ t, initial, busy, onCancel, onSaved }: ServerFormProps): J
         </Field>
       </div>
 
-      <Field label={t('fieldTransport')}>
-        <SegmentedControl
-          id="dshmcp-transport"
-          value={form.transport}
-          options={TRANSPORT_OPTIONS}
-          label={t('fieldTransport')}
-          disabled={locked}
-          onChange={(next) => set('transport', next)}
-        />
-      </Field>
+      {oauth === true ? null : (
+        <Field label={t('fieldTransport')}>
+          <SegmentedControl
+            id="dshmcp-transport"
+            value={form.transport}
+            options={TRANSPORT_OPTIONS}
+            label={t('fieldTransport')}
+            disabled={locked}
+            onChange={(next) => set('transport', next)}
+          />
+        </Field>
+      )}
 
       {form.transport === 'streamable-http' ? (
         <Field labelFor="dshmcp-url" label={t('fieldUrl')} hint={err('url')}>
@@ -1078,7 +1041,45 @@ function ServerForm({ t, initial, busy, onCancel, onSaved }: ServerFormProps): J
 
       {submitError !== null ? <p style={errorLineStyle} role="alert">{submitError}</p> : null}
 
+      {/* inventory `.statusWithDot` + `.status`/`.failure`: the probe sentence stays in the panel. */}
+      {probe !== undefined ? (
+        probe.skipped === true ? (
+          <p style={statusLineStyle}>
+            <span style={dotSlotStyle}><StateDot state="warning" size={10} /></span>
+            <span style={statusTextStyle}>{t('probeSkipped')} {probe.error ?? ''}</span>
+          </p>
+        ) : probe.ok ? (
+          <p style={statusLineStyle}>
+            <span style={dotSlotStyle}><StateDot state="done" size={10} /></span>
+            <span style={statusTextStyle}>
+              {t('probeOk', {
+                ms: String(probe.latencyMs),
+                count: probe.toolCount !== undefined ? String(probe.toolCount) : '?',
+              })}
+            </span>
+          </p>
+        ) : (
+          <p style={statusLineStyle}>
+            <span style={dotSlotStyle}><StateDot state="error" size={10} /></span>
+            <span style={failureStyle}>
+              {t('probeFail', { error: probe.error ?? 'failed', ms: String(probe.latencyMs) })}
+            </span>
+          </p>
+        )
+      ) : null}
+
       <div style={formActionsStyle}>
+        {editing && onTest !== undefined ? (
+          <Button
+            variant="outline"
+            size="sm"
+            icon={probing === true ? <StateDot state="ongoing" size={14} /> : undefined}
+            onClick={onTest}
+            disabled={locked}
+          >
+            {t('test')}
+          </Button>
+        ) : null}
         <Button variant="outline" size="sm" onClick={onCancel} disabled={saving}>
           {t('cancel')}
         </Button>
