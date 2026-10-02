@@ -38,7 +38,7 @@
  *
  * @module dsh-mcp-manager/client/McpManagerSection
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -60,7 +60,7 @@ import {
   type StateDotState,
   type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { MCP_OAUTH_CLIENT_PACKAGE } from '../shared.ts'
+import { MCP_CLIENT_PACKAGE, MCP_OAUTH_CLIENT_PACKAGE } from '../shared.ts'
 import type {
   McpFieldErrors,
   McpProbeResult,
@@ -108,6 +108,91 @@ interface ServerStatus {
 const TRANSPORT_LABELS: Record<McpTransport, string> = {
   stdio: 'STDIO',
   'streamable-http': 'Streamable HTTP',
+}
+
+/**
+ * The panel cannot subscribe to host pushes (the forwardable event keys are a
+ * fixed allowlist compiled into the application), so live updates come from an
+ * optimistic local echo plus a quiet poll. Both echoes below are dropped as
+ * soon as the host list agrees, and after this many consecutive host reads that
+ * disagree, so the rendered state always converges on the host truth.
+ */
+const MAX_ECHO_MISSES = 3
+
+/** Quiet-poll cadence while the panel is mounted and visible. */
+const POLL_INTERVAL_MS = 1500
+
+/** A row inserted locally right after a successful add, awaiting the host list. */
+interface OptimisticRow {
+  server: McpServerInfo
+  /** Consecutive successful host reads that did not contain this id. */
+  misses: number
+}
+
+/** A toggle echoed locally until the host list agrees (or the misses run out). */
+interface PendingToggle {
+  enabled: boolean
+  /** Consecutive successful host reads that still report the other value. */
+  misses: number
+}
+
+/** Read a plain object out of an untrusted reply. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/** Whether a row's connection has not been resolved yet. (Exported for the render harness.) */
+export function isConnecting(server: McpServerInfo): boolean {
+  if (!server.enabled) return false
+  return server.fiberPhase === null
+    || server.fiberPhase === 'pending'
+    || server.fiberPhase === 'loading'
+}
+
+/**
+ * The row the host reports for a successful `add` (the T14 contract:
+ * `{ added, row }`, with `row` absent when it could not be resolved). Only the
+ * fields this panel renders are read; an unresolved phase is forced so the row
+ * shows the connecting chip until the next host read resolves it.
+ */
+export function createdRowOf(value: unknown): McpServerInfo | undefined {
+  const raw = asRecord(asRecord(value)?.['row'])
+  const id = raw?.['id']
+  if (raw === undefined || typeof id !== 'string' || id === '') return undefined
+  const transport: McpTransport = raw['transport'] === 'stdio' ? 'stdio' : 'streamable-http'
+  const url = raw['url']
+  const command = raw['command']
+  return {
+    id,
+    serverName: typeof raw['serverName'] === 'string' && raw['serverName'] !== '' ? raw['serverName'] : id,
+    ownerPackage: typeof raw['ownerPackage'] === 'string' ? raw['ownerPackage'] : MCP_CLIENT_PACKAGE,
+    enabled: raw['enabled'] !== false,
+    fiberPhase: null,
+    toolCount: typeof raw['toolCount'] === 'number' ? raw['toolCount'] : 0,
+    userManaged: raw['userManaged'] !== false,
+    transport,
+    ...(transport === 'streamable-http'
+      ? (typeof url === 'string' ? { url } : {})
+      : (typeof command === 'string' ? { command } : {})),
+  }
+}
+
+/**
+ * Fallback echo for a host that does not (yet) return the created row: the
+ * submitted draft is enough to render the new row until the next host read.
+ */
+export function optimisticRowOf(draft: { id: string; config: McpServerConfig }): McpServerInfo {
+  return {
+    ...draft.config,
+    id: draft.id,
+    ownerPackage: MCP_CLIENT_PACKAGE,
+    enabled: true,
+    fiberPhase: null,
+    toolCount: 0,
+    userManaged: true,
+  }
 }
 
 const TRANSPORT_OPTIONS: readonly SegmentedControlOption<McpTransport>[] = [
@@ -325,10 +410,21 @@ const hintStyle: CSSProperties = {
 }
 /** models `.rowHead` gap 10 with `.modelRow`'s centred alignment between two field stacks. */
 const fieldRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 10 }
-/** models `.editorActions`' `space-between` idiom for the 超时 / 报错 row: field left, choices right. */
-const timeoutRowStyle: CSSProperties = { justifyContent: 'space-between', alignItems: 'center', display: 'flex' }
-/** The 超时 field takes half the row so the choices row can sit flush at the right end. */
+/**
+ * models `.editorActions`' `space-between` idiom for the 超时 / 报错 row: field
+ * left, choices right. `flex-start` (measured, .recon/row-mock) keeps each
+ * column's own caption on the same line: with `center`, a 超时 validation hint
+ * grows the left column and drags the choices row 25px down with it.
+ */
+const timeoutRowStyle: CSSProperties = { justifyContent: 'space-between', alignItems: 'flex-start', display: 'flex' }
+/** The 超时 field takes half the row so the choices column can sit flush at the right end. */
 const timeoutFieldStyle: CSSProperties = { flex: '0 1 50%' }
+/**
+ * The choices column is a field stack of its own (models `.field`), so its
+ * caption shares the 超时 caption's line instead of floating beside a 32px box —
+ * the official 输入类型 treatment (legend above, choices row below).
+ */
+const checkboxFieldStyle: CSSProperties = { flexDirection: 'column', gap: 6, display: 'flex', flex: '0 1 50%' }
 /** models `.editorHeader` title side; `space-between` + `flex-start` are the user's instruction. */
 const editorHeaderStyle: CSSProperties = {
   justifyContent: 'space-between',
@@ -352,13 +448,18 @@ const formActionsEndStyle: CSSProperties = {
   marginLeft: 'auto',
   display: 'flex',
 }
-/** models `.modelInputChoices`, bottom-aligned against the labelled input's 32px box. */
+/**
+ * The choices row repeats the kit Input's own box model — `.wrap` is
+ * `height:32px` in `content-box` with a `.5px` border, which Chromium renders
+ * 33–34px tall — so the 16px box centres on the input's rendered box rather
+ * than drifting half a border below it (measured 0.00px at DPR 1 and 2;
+ * .recon/row-mock). The border is transparent: it only borrows the box model.
+ */
 const checkboxCellStyle: CSSProperties = {
-  flexWrap: 'wrap',
+  boxSizing: 'content-box',
+  height: 32,
+  border: '.5px solid transparent',
   alignItems: 'center',
-  gap: 16,
-  minHeight: 32,
-  alignSelf: 'flex-end',
   display: 'flex',
 }
 /** models `.input` tokens; the kit ships no textarea, so this is the one native control. */
@@ -437,36 +538,109 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   const [probes, setProbes] = useState<Record<string, McpProbeResult>>({})
   const [removing, setRemoving] = useState<McpServerInfo | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
+  /** Rows echoed locally after an add, until the host list carries them. */
+  const [optimistic, setOptimistic] = useState<OptimisticRow[]>([])
+  /** Toggles echoed locally until the host list agrees (or the misses run out). */
+  const [pendingToggles, setPendingToggles] = useState<Record<string, PendingToggle>>({})
 
   const anyExpanded = Object.values(expanded).some((open) => open === true)
   const formOpen = adding || anyExpanded
   const actionsDisabled = busy !== null || formOpen
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
-    setError(null)
+  /** The busy label as the poll sees it, so the interval never restarts per render. */
+  const busyRef = useRef<string | null>(null)
+  useEffect(() => { busyRef.current = busy }, [busy])
+
+  /**
+   * Read the host list. A quiet read (the poll, and every post-write read) never
+   * touches `loading`/`error` and keeps the last good snapshot when it fails, so
+   * a host that is mid-reload right after a write cannot blank the panel.
+   * @param options - `quiet: true` for the poll and post-write reads.
+   */
+  const refresh = useCallback(async (options?: { quiet?: boolean }) => {
+    const quiet = options?.quiet === true
+    if (!quiet) {
+      setLoading(true)
+      setError(null)
+    }
     try {
       const { servers: list } = await callRpc<{ servers: McpServerInfo[] }>('list')
       setServers(list)
+      // Drop what the host has confirmed; count what it has not.
+      setOptimistic((prev) => {
+        if (prev.length === 0) return prev
+        const present = new Set(list.map((s) => s.id))
+        const next = prev
+          .filter((row) => !present.has(row.server.id))
+          .map((row) => ({ ...row, misses: row.misses + 1 }))
+          .filter((row) => row.misses < MAX_ECHO_MISSES)
+        return next.length === prev.length ? prev : next
+      })
+      setPendingToggles((prev) => {
+        const ids = Object.keys(prev)
+        if (ids.length === 0) return prev
+        const byId = new Map(list.map((s) => [s.id, s]))
+        const next: Record<string, PendingToggle> = {}
+        for (const id of ids) {
+          const pending = prev[id]
+          const host = byId.get(id)
+          if (pending === undefined || host === undefined) continue
+          if (host.enabled === pending.enabled) continue
+          const misses = pending.misses + 1
+          if (misses < MAX_ECHO_MISSES) next[id] = { enabled: pending.enabled, misses }
+        }
+        return Object.keys(next).length === ids.length ? prev : next
+      })
       const { patch } = await callRpc<{ patch: PatchInfo }>('patchInfo')
       setPatchInfo(patch)
     } catch (err) {
-      setError(errorMessage(err, t))
+      // A quiet read stays silent: the host can be reloading right after a write.
+      if (!quiet) setError(errorMessage(err, t))
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
   }, [t])
 
-  useEffect(() => { void refresh() }, [refresh])
+  /** The first read is the only loud one; later identity changes (locale) must not flash. */
+  const initialised = useRef(false)
+  useEffect(() => {
+    if (initialised.current) return
+    initialised.current = true
+    void refresh()
+  }, [refresh])
 
-  const run = useCallback(async (action: () => Promise<unknown>, label: string) => {
+  /** The quiet poll: visible panels only, never while an action is in flight. */
+  useEffect(() => {
+    const tick = () => {
+      if (busyRef.current !== null) return
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      void refresh({ quiet: true })
+    }
+    const interval = window.setInterval(tick, POLL_INTERVAL_MS)
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [refresh])
+
+  /**
+   * Run one action behind the busy flag, then converge with a quiet read.
+   * @returns whether the action succeeded (the caller may mirror that locally).
+   */
+  const run = useCallback(async (action: () => Promise<unknown>, label: string): Promise<boolean> => {
     setBusy(label)
     setError(null)
     try {
       await action()
-      await refresh()
+      await refresh({ quiet: true })
+      return true
     } catch (err) {
       setError(errorMessage(err, t))
+      return false
     } finally {
       setBusy(null)
     }
@@ -476,13 +650,6 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     (server: McpServerInfo): string => server.serverName || t('unnamed'),
     [t],
   )
-
-  const toggleEnabled = useCallback((server: McpServerInfo) => {
-    void run(
-      () => callRpc('setEnabled', { id: server.id, enabled: !server.enabled }),
-      `toggle:${server.id}`,
-    )
-  }, [run])
 
   const testConnection = useCallback((server: McpServerInfo) => {
     void run(async () => {
@@ -513,34 +680,60 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   }, [removing, run])
 
   /**
-   * One delayed re-read (~800ms) after a save: the immediate read returns as
-   * soon as the patch file is written, while the live fiber's status needs a
-   * moment to settle. A single retry, never a polling loop.
+   * The add card saved: close it, echo the created row immediately (the host's
+   * `{ added, row }` when present, otherwise the submitted draft), then converge
+   * with a quiet read.
    */
-  const refreshSoon = useCallback(() => {
-    window.setTimeout(() => { void refresh() }, 800)
-  }, [refresh])
-
-  /** The add card saved: close it, then re-read the host list. */
-  const savedAdd = useCallback(() => {
+  const savedAdd = useCallback((result: unknown, draft: { id: string; config: McpServerConfig }) => {
     setAdding(false)
+    const created = createdRowOf(result) ?? optimisticRowOf(draft)
+    setOptimistic((prev) => [
+      ...prev.filter((row) => row.server.id !== created.id),
+      { server: created, misses: 0 },
+    ])
     void run(() => Promise.resolve(), 'form:add')
-    refreshSoon()
-  }, [refreshSoon, run])
+  }, [run])
 
-  /** A card's form saved: collapse the card, then re-read the host list. */
+  /** A card's form saved: collapse the card, then converge with a quiet read. */
   const savedEdit = useCallback((id: string) => {
     closeCard(id)
     void run(() => Promise.resolve(), `form:update:${id}`)
-    refreshSoon()
-  }, [closeCard, refreshSoon, run])
+  }, [closeCard, run])
+
+  /** Toggling flips the row before the RPC and reverts if the host refuses it. */
+  const toggleEnabled = useCallback((server: McpServerInfo) => {
+    const pending = pendingToggles[server.id]
+    const next = !(pending?.enabled ?? server.enabled)
+    setPendingToggles((prev) => ({ ...prev, [server.id]: { enabled: next, misses: 0 } }))
+    void run(
+      () => callRpc('setEnabled', { id: server.id, enabled: next }),
+      `toggle:${server.id}`,
+    ).then((ok) => {
+      if (ok) return
+      // The host refused the change: follow the host value again at once.
+      setPendingToggles((prev) => {
+        const { [server.id]: _dropped, ...rest } = prev
+        return rest
+      })
+    })
+  }, [pendingToggles, run])
+
+  /**
+   * The rendered list: the host's rows plus any optimistic add the host has not
+   * reported yet. An optimistic row is dropped as soon as a read contains its id.
+   */
+  const rows = useMemo(() => {
+    if (optimistic.length === 0) return servers
+    const hostIds = new Set(servers.map((server) => server.id))
+    return [...servers, ...optimistic.map((row) => row.server).filter((server) => !hostIds.has(server.id))]
+  }, [optimistic, servers])
 
   const summary = useMemo(() => {
-    const enabled = servers.filter((s) => s.enabled).length
-    const connected = servers.filter((s) => s.enabled && s.fiberPhase === 'active' && s.toolCount > 0).length
-    const failed = servers.filter((s) => s.enabled && s.fiberPhase === 'failed').length
-    return { total: servers.length, enabled, connected, failed }
-  }, [servers])
+    const enabled = rows.filter((s) => s.enabled).length
+    const connected = rows.filter((s) => s.enabled && s.fiberPhase === 'active' && s.toolCount > 0).length
+    const failed = rows.filter((s) => s.enabled && s.fiberPhase === 'failed').length
+    return { total: rows.length, enabled, connected, failed }
+  }, [rows])
 
   /** models `.intro` sentence: total, connected, failures when any, enabled ratio. */
   const summaryText = useMemo(() => {
@@ -607,14 +800,14 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
 
       {error !== null ? <p style={errorLineStyle} role="alert">{error}</p> : null}
 
-      {loading && servers.length === 0 && !formOpen ? (
+      {loading && rows.length === 0 && !formOpen ? (
         <p style={statusLineStyle} role="status">
           <span style={dotSlotStyle}><StateDot state="ongoing" size={10} /></span>
           <span style={statusTextStyle}>{t('loading')}</span>
         </p>
       ) : null}
 
-      {!loading && servers.length === 0 && !formOpen ? (
+      {!loading && rows.length === 0 && !formOpen ? (
         <p style={emptyBoxStyle}>
           {t('empty')} {t('emptyHint')}
         </p>
@@ -635,13 +828,16 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
           </li>
         ) : null}
 
-        {servers.map((server) => {
-          const status = statusOf(server)
+        {rows.map((server) => {
+          // The locally echoed toggle, when one is in flight, is what the row shows.
+          const pending = pendingToggles[server.id]
+          const shown = pending === undefined ? server : { ...server, enabled: pending.enabled }
+          const status = statusOf(shown)
           const statusText = t(status.key, status.count !== undefined ? { count: status.count } : undefined)
           const open = expanded[server.id] === true
           const probe = probes[server.id]
           const probing = busy === `probe:${server.id}`
-          const failed = server.enabled && server.fiberPhase === 'failed'
+          const failed = shown.enabled && shown.fiberPhase === 'failed'
           const oauth = server.ownerPackage === MCP_OAUTH_CLIENT_PACKAGE
           const regionId = `mcp-details-${server.id}`
           return (
@@ -655,10 +851,11 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                 {/*
                  * The title area is the disclosure toggle (inventory
                  * `cardContent` as a bare button): name, then the identity
-                 * chips — status/tools, transport, OAuth — and the chevron.
-                 * The enable Switch lives outside it in `rowActions`, so a
-                 * collapsed card stays toggleable and clicking the Switch never
-                 * toggles the card. 删除 belongs to the inner panel's header.
+                 * chips — status/tools, transport (or the connecting chip until
+                 * the phase resolves), OAuth — and the chevron. The enable
+                 * Switch lives outside it in `rowActions`, so a collapsed card
+                 * stays toggleable and clicking the Switch never toggles the
+                 * card. 删除 belongs to the inner panel's header.
                  */}
                 <button
                   type="button"
@@ -669,7 +866,9 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                 >
                   <span style={rowNameStyle}>{displayName(server)}</span>
                   <Tag tone={status.tone}>{statusText}</Tag>
-                  <Tag tone="neutral">{TRANSPORT_LABELS[server.transport]}</Tag>
+                  {isConnecting(shown)
+                    ? <Tag tone="neutral">{t('connecting')}</Tag>
+                    : <Tag tone="neutral">{TRANSPORT_LABELS[server.transport]}</Tag>}
                   {oauth ? <Tag tone="info">OAuth</Tag> : null}
                   <span style={{ ...chevronWrapStyle, transform: open ? 'rotate(180deg)' : 'none' }}>
                     <IconChevronDownOutlineRegular size={12} />
@@ -678,9 +877,9 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
 
                 <span style={rowActionsStyle}>
                   <Switch
-                    checked={server.enabled}
+                    checked={shown.enabled}
                     label={t('enable')}
-                    title={server.enabled ? t('disable') : t('enable')}
+                    title={shown.enabled ? t('disable') : t('enable')}
                     disabled={actionsDisabled}
                     onChange={() => toggleEnabled(server)}
                   />
@@ -754,7 +953,8 @@ interface ServerFormProps {
   /** Tooltip of the header's remove action: the action, or why the row is bundle-owned. */
   removeLabel?: string | undefined
   onCancel: () => void
-  onSaved: () => void
+  /** Receives the host's reply and the submitted payload (the add echo needs both). */
+  onSaved: (result: unknown, draft: { id: string; config: McpServerConfig }) => void
 }
 
 interface FormState {
@@ -880,19 +1080,32 @@ function toConfig(form: FormState, oauth: boolean): McpServerConfig {
 }
 
 /** A labelled field: label, control, and the host's validation hint for it. */
-function Field({ labelFor, label, hint, style, children }: {
+function Field({ labelFor, label, hint, style, onLabelClick, children }: {
   /** Id of the control this label names; omitted when the control owns no such id. */
   labelFor?: string | undefined
   label: string
   hint?: string | undefined
   /** Extra placement for this field, merged over the shared stack. */
   style?: CSSProperties | undefined
+  /**
+   * Makes the caption activate the control. The kit Checkbox owns its input and
+   * exposes no id, so a checkbox field cannot use `htmlFor`: it captions the
+   * control itself and this carries the click.
+   */
+  onLabelClick?: (() => void) | undefined
   children: ReactNode
 }): JSX.Element {
   return (
     <div style={{ ...fieldStyle, ...style }}>
       {labelFor === undefined
-        ? <span style={labelStyle}>{label}</span>
+        ? (
+          <span
+            style={onLabelClick === undefined ? labelStyle : { ...labelStyle, cursor: 'pointer' }}
+            onClick={onLabelClick}
+          >
+            {label}
+          </span>
+        )
         : <label style={labelStyle} htmlFor={labelFor}>{label}</label>}
       {children}
       {hint !== undefined ? <p style={hintStyle}>{hint}</p> : null}
@@ -942,8 +1155,8 @@ export function ServerForm({
     setFieldErrors({})
     try {
       const payload = { id: form.id.trim(), config: toConfig(form, oauth === true) }
-      await callRpc(editing ? 'update' : 'add', payload)
-      onSaved()
+      const result = await callRpc(editing ? 'update' : 'add', payload)
+      onSaved(result, payload)
     } catch (err) {
       setFieldErrors(err instanceof McpManagerRpcError ? err.fields ?? {} : {})
       setSubmitError(errorMessage(err, t))
@@ -1135,14 +1348,28 @@ export function ServerForm({
             onChange={(e) => set('toolCallTimeoutMs', e.target.value.replace(/[^0-9]/g, ''))}
           />
         </Field>
-        <div style={checkboxCellStyle}>
-          <Checkbox
-            checked={form.failOnStartupError}
-            label={t('fieldFailStartup')}
-            disabled={locked}
-            onChange={(next) => set('failOnStartupError', next)}
-          />
-        </div>
+        <Field
+          label={t('fieldFailStartup')}
+          style={checkboxFieldStyle}
+          onLabelClick={() => set('failOnStartupError', !form.failOnStartupError)}
+        >
+          <div style={checkboxCellStyle}>
+            {/*
+             * The kit Checkbox requires a `label` and owns its input, so a field
+             * that captions the control above it passes an empty one: the
+             * visible text is the field caption (12/18, the 超时 caption's own
+             * line), and `title` — which the kit forwards to its `<label>` —
+             * supplies the accessible name the empty label no longer can.
+             */}
+            <Checkbox
+              checked={form.failOnStartupError}
+              label=""
+              title={t('fieldFailStartup')}
+              disabled={locked}
+              onChange={(next) => set('failOnStartupError', next)}
+            />
+          </div>
+        </Field>
       </div>
 
       {submitError !== null ? <p style={errorLineStyle} role="alert">{submitError}</p> : null}

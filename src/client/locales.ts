@@ -39,6 +39,7 @@ export type McpManagerKeys =
   | 'statusPending'
   | 'statusUnloading'
   | 'statusNotLoaded'
+  | 'connecting'
   | 'toolCount'
   | 'bundleDefined'
   | 'probeOk'
@@ -105,6 +106,7 @@ export const zh: McpManagerDict = {
   statusPending: '等待中',
   statusUnloading: '卸载中',
   statusNotLoaded: '未加载',
+  connecting: '连接中',
   toolCount: '{count} 个工具',
   bundleDefined: 'bundle 定义',
   probeOk: '已连接，耗时 {ms}ms · {count} 个工具',
@@ -163,6 +165,7 @@ export const en: McpManagerDict = {
   statusPending: 'Pending',
   statusUnloading: 'Unloading',
   statusNotLoaded: 'Not loaded',
+  connecting: 'Connecting',
   toolCount: '{count} tools',
   bundleDefined: 'bundle-defined',
   probeOk: 'Connected in {ms}ms · {count} tools',
