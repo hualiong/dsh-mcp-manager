@@ -60,7 +60,7 @@ import {
   type StateDotState,
   type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { MCP_CLIENT_PACKAGE, MCP_OAUTH_CLIENT_PACKAGE } from '../shared.ts'
+import { EVENT_CHANNEL, MCP_OAUTH_CLIENT_PACKAGE } from '../shared.ts'
 import type {
   McpFieldErrors,
   McpProbeResult,
@@ -110,89 +110,12 @@ const TRANSPORT_LABELS: Record<McpTransport, string> = {
   'streamable-http': 'Streamable HTTP',
 }
 
-/**
- * The panel cannot subscribe to host pushes (the forwardable event keys are a
- * fixed allowlist compiled into the application), so live updates come from an
- * optimistic local echo plus a quiet poll. Both echoes below are dropped as
- * soon as the host list agrees, and after this many consecutive host reads that
- * disagree, so the rendered state always converges on the host truth.
- */
-const MAX_ECHO_MISSES = 3
-
-/** Quiet-poll cadence while the panel is mounted and visible. */
-const POLL_INTERVAL_MS = 1500
-
-/** A row inserted locally right after a successful add, awaiting the host list. */
-interface OptimisticRow {
-  server: McpServerInfo
-  /** Consecutive successful host reads that did not contain this id. */
-  misses: number
-}
-
-/** A toggle echoed locally until the host list agrees (or the misses run out). */
-interface PendingToggle {
-  enabled: boolean
-  /** Consecutive successful host reads that still report the other value. */
-  misses: number
-}
-
-/** Read a plain object out of an untrusted reply. */
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined
-}
-
 /** Whether a row's connection has not been resolved yet. (Exported for the render harness.) */
 export function isConnecting(server: McpServerInfo): boolean {
   if (!server.enabled) return false
   return server.fiberPhase === null
     || server.fiberPhase === 'pending'
     || server.fiberPhase === 'loading'
-}
-
-/**
- * The row the host reports for a successful `add` (the T14 contract:
- * `{ added, row }`, with `row` absent when it could not be resolved). Only the
- * fields this panel renders are read; an unresolved phase is forced so the row
- * shows the connecting chip until the next host read resolves it.
- */
-export function createdRowOf(value: unknown): McpServerInfo | undefined {
-  const raw = asRecord(asRecord(value)?.['row'])
-  const id = raw?.['id']
-  if (raw === undefined || typeof id !== 'string' || id === '') return undefined
-  const transport: McpTransport = raw['transport'] === 'stdio' ? 'stdio' : 'streamable-http'
-  const url = raw['url']
-  const command = raw['command']
-  return {
-    id,
-    serverName: typeof raw['serverName'] === 'string' && raw['serverName'] !== '' ? raw['serverName'] : id,
-    ownerPackage: typeof raw['ownerPackage'] === 'string' ? raw['ownerPackage'] : MCP_CLIENT_PACKAGE,
-    enabled: raw['enabled'] !== false,
-    fiberPhase: null,
-    toolCount: typeof raw['toolCount'] === 'number' ? raw['toolCount'] : 0,
-    userManaged: raw['userManaged'] !== false,
-    transport,
-    ...(transport === 'streamable-http'
-      ? (typeof url === 'string' ? { url } : {})
-      : (typeof command === 'string' ? { command } : {})),
-  }
-}
-
-/**
- * Fallback echo for a host that does not (yet) return the created row: the
- * submitted draft is enough to render the new row until the next host read.
- */
-export function optimisticRowOf(draft: { id: string; config: McpServerConfig }): McpServerInfo {
-  return {
-    ...draft.config,
-    id: draft.id,
-    ownerPackage: MCP_CLIENT_PACKAGE,
-    enabled: true,
-    fiberPhase: null,
-    toolCount: 0,
-    userManaged: true,
-  }
 }
 
 const TRANSPORT_OPTIONS: readonly SegmentedControlOption<McpTransport>[] = [
@@ -538,24 +461,17 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   const [probes, setProbes] = useState<Record<string, McpProbeResult>>({})
   const [removing, setRemoving] = useState<McpServerInfo | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
-  /** Rows echoed locally after an add, until the host list carries them. */
-  const [optimistic, setOptimistic] = useState<OptimisticRow[]>([])
-  /** Toggles echoed locally until the host list agrees (or the misses run out). */
-  const [pendingToggles, setPendingToggles] = useState<Record<string, PendingToggle>>({})
 
   const anyExpanded = Object.values(expanded).some((open) => open === true)
   const formOpen = adding || anyExpanded
   const actionsDisabled = busy !== null || formOpen
 
-  /** The busy label as the poll sees it, so the interval never restarts per render. */
-  const busyRef = useRef<string | null>(null)
-  useEffect(() => { busyRef.current = busy }, [busy])
-
   /**
-   * Read the host list. A quiet read (the poll, and every post-write read) never
-   * touches `loading`/`error` and keeps the last good snapshot when it fails, so
-   * a host that is mid-reload right after a write cannot blank the panel.
-   * @param options - `quiet: true` for the poll and post-write reads.
+   * Read the host list. A quiet read — the stream nudge, every post-write read,
+   * and the focus/visibility fallbacks — never touches `loading`/`error` and
+   * keeps the last good snapshot when it fails, so a host that is mid-reload
+   * right after a write cannot blank the panel.
+   * @param options - `quiet: true` keeps the read silent.
    */
   const refresh = useCallback(async (options?: { quiet?: boolean }) => {
     const quiet = options?.quiet === true
@@ -566,31 +482,6 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     try {
       const { servers: list } = await callRpc<{ servers: McpServerInfo[] }>('list')
       setServers(list)
-      // Drop what the host has confirmed; count what it has not.
-      setOptimistic((prev) => {
-        if (prev.length === 0) return prev
-        const present = new Set(list.map((s) => s.id))
-        const next = prev
-          .filter((row) => !present.has(row.server.id))
-          .map((row) => ({ ...row, misses: row.misses + 1 }))
-          .filter((row) => row.misses < MAX_ECHO_MISSES)
-        return next.length === prev.length ? prev : next
-      })
-      setPendingToggles((prev) => {
-        const ids = Object.keys(prev)
-        if (ids.length === 0) return prev
-        const byId = new Map(list.map((s) => [s.id, s]))
-        const next: Record<string, PendingToggle> = {}
-        for (const id of ids) {
-          const pending = prev[id]
-          const host = byId.get(id)
-          if (pending === undefined || host === undefined) continue
-          if (host.enabled === pending.enabled) continue
-          const misses = pending.misses + 1
-          if (misses < MAX_ECHO_MISSES) next[id] = { enabled: pending.enabled, misses }
-        }
-        return Object.keys(next).length === ids.length ? prev : next
-      })
       const { patch } = await callRpc<{ patch: PatchInfo }>('patchInfo')
       setPatchInfo(patch)
     } catch (err) {
@@ -609,38 +500,48 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     void refresh()
   }, [refresh])
 
-  /** The quiet poll: visible panels only, never while an action is in flight. */
+  /**
+   * Live updates come from the host's event stream (`text/event-stream`), the
+   * same way the harness's own HMR channel works: every frame is a nudge, so
+   * the panel just runs the quiet read. The browser reconnects a dropped stream
+   * on its own, so an error is deliberately ignored — and a build without
+   * `EventSource` simply falls back to the focus/visibility reads below.
+   */
   useEffect(() => {
-    const tick = () => {
-      if (busyRef.current !== null) return
+    if (typeof EventSource === 'undefined') return
+    const source = new EventSource(EVENT_CHANNEL)
+    source.onmessage = () => { void refresh({ quiet: true }) }
+    source.onerror = () => { /* the browser reconnects; the fallback reads cover the gap */ }
+    return () => { source.close() }
+  }, [refresh])
+
+  /**
+   * Belt and braces for a web build where the stream never connects: revalidate
+   * whenever the window regains focus or the page becomes visible again.
+   */
+  useEffect(() => {
+    const revalidate = () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       void refresh({ quiet: true })
     }
-    const interval = window.setInterval(tick, POLL_INTERVAL_MS)
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') tick()
-    }
+    const onVisibility = () => { revalidate() }
+    window.addEventListener('focus', revalidate)
     document.addEventListener('visibilitychange', onVisibility)
     return () => {
-      window.clearInterval(interval)
+      window.removeEventListener('focus', revalidate)
       document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [refresh])
 
-  /**
-   * Run one action behind the busy flag, then converge with a quiet read.
-   * @returns whether the action succeeded (the caller may mirror that locally).
-   */
-  const run = useCallback(async (action: () => Promise<unknown>, label: string): Promise<boolean> => {
+  /** Run one action behind the busy flag, then revalidate with a quiet read. */
+  const run = useCallback(async (action: () => Promise<unknown>, label: string) => {
     setBusy(label)
     setError(null)
     try {
       await action()
       await refresh({ quiet: true })
-      return true
     } catch (err) {
       setError(errorMessage(err, t))
-      return false
     } finally {
       setBusy(null)
     }
@@ -679,61 +580,31 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     void run(() => callRpc('remove', { id: target.id }), `remove:${target.id}`)
   }, [removing, run])
 
-  /**
-   * The add card saved: close it, echo the created row immediately (the host's
-   * `{ added, row }` when present, otherwise the submitted draft), then converge
-   * with a quiet read.
-   */
-  const savedAdd = useCallback((result: unknown, draft: { id: string; config: McpServerConfig }) => {
+  /** The add card saved: close it, then revalidate with a quiet read. */
+  const savedAdd = useCallback(() => {
     setAdding(false)
-    const created = createdRowOf(result) ?? optimisticRowOf(draft)
-    setOptimistic((prev) => [
-      ...prev.filter((row) => row.server.id !== created.id),
-      { server: created, misses: 0 },
-    ])
     void run(() => Promise.resolve(), 'form:add')
   }, [run])
 
-  /** A card's form saved: collapse the card, then converge with a quiet read. */
+  /** A card's form saved: collapse the card, then revalidate with a quiet read. */
   const savedEdit = useCallback((id: string) => {
     closeCard(id)
     void run(() => Promise.resolve(), `form:update:${id}`)
   }, [closeCard, run])
 
-  /** Toggling flips the row before the RPC and reverts if the host refuses it. */
   const toggleEnabled = useCallback((server: McpServerInfo) => {
-    const pending = pendingToggles[server.id]
-    const next = !(pending?.enabled ?? server.enabled)
-    setPendingToggles((prev) => ({ ...prev, [server.id]: { enabled: next, misses: 0 } }))
     void run(
-      () => callRpc('setEnabled', { id: server.id, enabled: next }),
+      () => callRpc('setEnabled', { id: server.id, enabled: !server.enabled }),
       `toggle:${server.id}`,
-    ).then((ok) => {
-      if (ok) return
-      // The host refused the change: follow the host value again at once.
-      setPendingToggles((prev) => {
-        const { [server.id]: _dropped, ...rest } = prev
-        return rest
-      })
-    })
-  }, [pendingToggles, run])
-
-  /**
-   * The rendered list: the host's rows plus any optimistic add the host has not
-   * reported yet. An optimistic row is dropped as soon as a read contains its id.
-   */
-  const rows = useMemo(() => {
-    if (optimistic.length === 0) return servers
-    const hostIds = new Set(servers.map((server) => server.id))
-    return [...servers, ...optimistic.map((row) => row.server).filter((server) => !hostIds.has(server.id))]
-  }, [optimistic, servers])
+    )
+  }, [run])
 
   const summary = useMemo(() => {
-    const enabled = rows.filter((s) => s.enabled).length
-    const connected = rows.filter((s) => s.enabled && s.fiberPhase === 'active' && s.toolCount > 0).length
-    const failed = rows.filter((s) => s.enabled && s.fiberPhase === 'failed').length
-    return { total: rows.length, enabled, connected, failed }
-  }, [rows])
+    const enabled = servers.filter((s) => s.enabled).length
+    const connected = servers.filter((s) => s.enabled && s.fiberPhase === 'active' && s.toolCount > 0).length
+    const failed = servers.filter((s) => s.enabled && s.fiberPhase === 'failed').length
+    return { total: servers.length, enabled, connected, failed }
+  }, [servers])
 
   /** models `.intro` sentence: total, connected, failures when any, enabled ratio. */
   const summaryText = useMemo(() => {
@@ -800,14 +671,14 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
 
       {error !== null ? <p style={errorLineStyle} role="alert">{error}</p> : null}
 
-      {loading && rows.length === 0 && !formOpen ? (
+      {loading && servers.length === 0 && !formOpen ? (
         <p style={statusLineStyle} role="status">
           <span style={dotSlotStyle}><StateDot state="ongoing" size={10} /></span>
           <span style={statusTextStyle}>{t('loading')}</span>
         </p>
       ) : null}
 
-      {!loading && rows.length === 0 && !formOpen ? (
+      {!loading && servers.length === 0 && !formOpen ? (
         <p style={emptyBoxStyle}>
           {t('empty')} {t('emptyHint')}
         </p>
@@ -828,16 +699,13 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
           </li>
         ) : null}
 
-        {rows.map((server) => {
-          // The locally echoed toggle, when one is in flight, is what the row shows.
-          const pending = pendingToggles[server.id]
-          const shown = pending === undefined ? server : { ...server, enabled: pending.enabled }
-          const status = statusOf(shown)
+        {servers.map((server) => {
+          const status = statusOf(server)
           const statusText = t(status.key, status.count !== undefined ? { count: status.count } : undefined)
           const open = expanded[server.id] === true
           const probe = probes[server.id]
           const probing = busy === `probe:${server.id}`
-          const failed = shown.enabled && shown.fiberPhase === 'failed'
+          const failed = server.enabled && server.fiberPhase === 'failed'
           const oauth = server.ownerPackage === MCP_OAUTH_CLIENT_PACKAGE
           const regionId = `mcp-details-${server.id}`
           return (
@@ -866,7 +734,7 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                 >
                   <span style={rowNameStyle}>{displayName(server)}</span>
                   <Tag tone={status.tone}>{statusText}</Tag>
-                  {isConnecting(shown)
+                  {isConnecting(server)
                     ? <Tag tone="neutral">{t('connecting')}</Tag>
                     : <Tag tone="neutral">{TRANSPORT_LABELS[server.transport]}</Tag>}
                   {oauth ? <Tag tone="info">OAuth</Tag> : null}
@@ -877,9 +745,9 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
 
                 <span style={rowActionsStyle}>
                   <Switch
-                    checked={shown.enabled}
+                    checked={server.enabled}
                     label={t('enable')}
-                    title={shown.enabled ? t('disable') : t('enable')}
+                    title={server.enabled ? t('disable') : t('enable')}
                     disabled={actionsDisabled}
                     onChange={() => toggleEnabled(server)}
                   />
@@ -950,8 +818,7 @@ interface ServerFormProps {
   /** Edit only: open the remove confirmation (panel header, right). */
   onRemove?: (() => void) | undefined
   onCancel: () => void
-  /** Receives the host's reply and the submitted payload (the add echo needs both). */
-  onSaved: (result: unknown, draft: { id: string; config: McpServerConfig }) => void
+  onSaved: () => void
 }
 
 interface FormState {
@@ -1151,8 +1018,8 @@ export function ServerForm({
     setFieldErrors({})
     try {
       const payload = { id: form.id.trim(), config: toConfig(form, oauth === true) }
-      const result = await callRpc(editing ? 'update' : 'add', payload)
-      onSaved(result, payload)
+      await callRpc(editing ? 'update' : 'add', payload)
+      onSaved()
     } catch (err) {
       setFieldErrors(err instanceof McpManagerRpcError ? err.fields ?? {} : {})
       setSubmitError(errorMessage(err, t))
