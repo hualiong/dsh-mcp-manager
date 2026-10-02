@@ -3,23 +3,31 @@
  * enable/disable, edit and on-demand connectivity tests. Rendered inside the
  * Settings panel as the "MCP" page (a `settings.section` entry).
  *
- * Everything interactive here comes from the official component kit
- * (`@deepseek-ai/dsh-client-ui-primitives`) — Button, Input, Switch, Tag,
- * StateDot, DisclosureRow, SegmentedControl, Checkbox, Tooltip,
- * RiskConfirmation, PathLabel and the product icons — so the page wears the
- * shell's own look and behaviour. The only styles this module owns are inline
- * layout declarations on its own containers (stack, card, field column, meta
- * row): the kit ships no layout primitives, and the framework's own rule is
- * that a card stacking name over description belongs to the feature package.
+ * Layout and typography mirror the official settings pages. The card is the
+ * 模型 page's configured-row structure — `rowCard` / `rowHead` / `rowIdentity`
+ * / `rowName` / `rowTag` / `rowActions`
+ * (`.recon/official/settings-models.client.js`) — with the disclosure
+ * mechanics of the plugin-inventory card (`cardContent` toggle, chevron at
+ * `data-open` rotation, `cardDetails` panel;
+ * `.recon/official/settings-plugin-inventory.client.js`). Every number and
+ * token below is copied from those bundles; each style constant names the
+ * official rule it reproduces.
+ *
+ * The transcript-facing `DisclosureRow` primitive is deliberately NOT used:
+ * its contract is a 24px tertiary process row, so it cannot carry the
+ * settings-page title scale or host the row's controls.
+ *
+ * Controls still come from the official kit
+ * (`@deepseek-ai/dsh-client-ui-primitives`): Button (`md` = the page's 36px
+ * actions, `sm` = the row's 28px actions), Input, Switch, Tag, StateDot,
+ * SegmentedControl, Checkbox, Tooltip, RiskConfirmation, PathLabel and the
+ * product icons. The only styles this module owns are inline declarations
+ * carrying those official values — the kit ships no layout primitives and this
+ * package has no CSS file.
  *
  * Copy is fully localized (zh/en); the renderer hands the registered `locale:`
  * namespace's `t` seat in as a prop, so the page follows the active GUI
  * language without subscribing to locale state itself.
- *
- * The add form sits at the top of the page; the edit form opens **in place of**
- * the card being edited, and the two modes are mutually exclusive. Data flows
- * through the typed fetch client to the host half; field-level validation
- * feedback is the host's (`err.fields`), never a second copy of its rules.
  *
  * @module dsh-mcp-manager/client/McpManagerSection
  */
@@ -29,16 +37,10 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
   Checkbox,
-  DisclosureRow,
-  IconCheckCircleFillRegular,
-  IconCodeOutlineRegular,
-  IconEditOutlineRegular,
-  IconGlobeOutlineRegular,
-  IconPlayOutlineRegular,
+  IconChevronDownOutlineRegular,
   IconPlusOutlineRegular,
   IconRefreshOutlineRegular,
   IconTrashOutlineRegular,
-  IconWarningOutlineRegular,
   Input,
   PathLabel,
   RiskConfirmation,
@@ -92,104 +94,235 @@ interface ServerStatus {
   count?: string
 }
 
-/**
- * Inline layout styles. The kit styles every control; these objects only place
- * its output (and the multi-line textareas it does not ship) inside the page,
- * using the same `--dsw-*` tokens the kit reads so both themes stay in step.
- */
-const sectionStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 12, width: '100%', maxWidth: 720 }
-const headStyle: CSSProperties = { display: 'flex', alignItems: 'baseline', gap: 8 }
-const headTitleStyle: CSSProperties = { fontSize: 16, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }
-const headSubStyle: CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
-const toolbarStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
-const spacerStyle: CSSProperties = { flex: 1 }
-const metaStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
-const metaBadStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
-const errorStyle: CSSProperties = {
+// --- official values -----------------------------------------------------------------
+// `models` = ModelsSection.module.css inside .recon/official/settings-models.client.js
+// `inventory` = PluginInventorySettingsTab.module.css inside
+//   .recon/official/settings-plugin-inventory.client.js
+// `general` = settings-general.client.js
+
+/** models `.section` — the settings page column. */
+const sectionStyle: CSSProperties = {
+  maxWidth: 720,
+  color: 'var(--dsw-alias-label-primary)',
+  flexDirection: 'column',
+  gap: 12,
   display: 'flex',
-  alignItems: 'center',
+}
+/** models `.title` — the page heading. */
+const titleStyle: CSSProperties = {
+  color: 'var(--dsw-alias-label-primary)',
+  margin: 0,
+  fontSize: 16,
+  fontWeight: 500,
+  lineHeight: '24px',
+}
+/** models `.intro` — the summary sentence under the heading. */
+const introStyle: CSSProperties = {
+  color: 'var(--dsw-alias-label-tertiary)',
+  margin: 0,
+  fontSize: 14,
+  lineHeight: '22px',
+}
+/** models `.addActions` + `.editorActions` gap; general `.actions` alignment. */
+const toolbarStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8 }
+/** models `.rows` — the card list. */
+const rowsStyle: CSSProperties = {
+  flexDirection: 'column',
   gap: 8,
-  padding: '8px 12px',
-  border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, transparent)',
-  borderRadius: 9,
-  background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent)',
-  color: 'var(--dsw-alias-state-error-primary)',
-  fontSize: 12,
+  margin: '12px 0 0',
+  padding: 0,
+  listStyle: 'none',
+  display: 'flex',
 }
-const cardStyle: CSSProperties = {
-  border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 12,
-  background: 'var(--dsw-alias-bg-layer-3)',
-  padding: '8px 12px 4px',
+/** models `.rowCard` — one server card. */
+const rowCardStyle: CSSProperties = {
+  border: '.5px solid var(--dsw-alias-settings-card-stroke)',
+  background: 'var(--dsw-alias-settings-card-fill)',
+  borderRadius: 'var(--dsw-radius-xl)',
+  flexDirection: 'column',
+  gap: 12,
+  padding: '12px 14px',
+  display: 'flex',
 }
-const cardBodyStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10, padding: '2px 0 14px 22px' }
-const statusGroupStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }
-const targetStyle: CSSProperties = {
-  fontSize: 12.5,
-  fontFamily: 'ui-monospace, Consolas, monospace',
-  color: 'var(--dsw-alias-label-secondary)',
+/** inventory `.card[data-failed=true]` — the card's stroke colour only. */
+const rowCardFailedStyle: CSSProperties = {
+  ...rowCardStyle,
+  borderColor: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent)',
+}
+/** inventory `.card[data-open=true]` — an expanded card's stroke; failure wins (source order). */
+const rowCardOpenStyle: CSSProperties = {
+  ...rowCardStyle,
+  borderColor: 'var(--dsw-alias-border-l3)',
+}
+/** models `.addCard` / `.setupCard` — the add form's card. */
+const addCardStyle: CSSProperties = {
+  borderRadius: 'var(--dsw-radius-lg)',
+  background: 'var(--dsw-alias-bg-module-platform)',
+  flexDirection: 'column',
+  gap: 14,
+  padding: '14px 16px',
+  listStyle: 'none',
+  display: 'flex',
+}
+/** models `.editor` — the nested edit panel inside a row card. */
+const editorStyle: CSSProperties = {
+  borderRadius: 'var(--dsw-radius-lg)',
+  background: 'var(--dsw-alias-bg-module-platform)',
+  flexDirection: 'column',
+  gap: 14,
+  padding: '14px 16px',
+  display: 'flex',
+}
+/** models `.rowHead` — identity plus actions, one centred row. */
+const rowHeadStyle: CSSProperties = { alignItems: 'center', gap: 10, display: 'flex' }
+/** models `.rowName` + inventory `.cardTitle` ellipsis. */
+const rowNameStyle: CSSProperties = {
+  color: 'var(--dsw-alias-label-primary)',
+  fontSize: 14,
+  fontWeight: 500,
+  lineHeight: '22px',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 }
-const tagRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }
-const probeStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
-const probeOkStyle: CSSProperties = { color: 'var(--dsw-alias-state-success-primary)', overflowWrap: 'anywhere' }
-const probeBadStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)', overflowWrap: 'anywhere' }
-/** A skipped probe is a stated reason, not a failure: neutral, not red. */
-const probeNoteStyle: CSSProperties = { color: 'var(--dsw-alias-label-secondary)', overflowWrap: 'anywhere' }
-const actionsStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  flexWrap: 'wrap',
-  borderTop: '1px solid var(--dsw-alias-border-l2)',
-  paddingTop: 10,
+/** models `.rowTag` — the entry-id chip beside the name. */
+const rowTagStyle: CSSProperties = {
+  border: '.5px solid var(--dsw-alias-border-l3)',
+  borderRadius: 'var(--dsw-radius-xs)',
+  color: 'var(--dsw-alias-label-secondary)',
+  flex: 'none',
+  padding: '1px 6px',
+  fontSize: 11,
+  lineHeight: '16px',
 }
-const switchGroupStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 4 }
-const switchLabelStyle: CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }
-const formStyle: CSSProperties = {
+/** models `.rowActions` — the right-aligned control cluster (`margin-left:auto`). */
+const rowActionsStyle: CSSProperties = { alignItems: 'center', gap: 4, marginLeft: 'auto', display: 'inline-flex' }
+/** models `.rowIdentity` metrics on inventory `.cardContent` (a bare toggle button). */
+const rowToggleStyle: CSSProperties = {
+  boxSizing: 'border-box',
   display: 'flex',
-  flexDirection: 'column',
-  gap: 12,
-  padding: 18,
-  border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 12,
-  background: 'var(--dsw-alias-bg-layer-3)',
-}
-const formTitleStyle: CSSProperties = { fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }
-const fieldStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 0 }
-const labelStyle: CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }
-const hintStyle: CSSProperties = { margin: 0, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' }
-const fieldRowStyle: CSSProperties = { display: 'flex', gap: 10 }
-const formActionsStyle: CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 2 }
-const emptyStyle: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
   alignItems: 'center',
   gap: 6,
-  padding: '36px 16px',
-  fontSize: 13,
+  minWidth: 0,
+  flex: 'auto',
+  padding: 0,
+  border: 0,
+  background: 'none',
+  color: 'inherit',
+  font: 'inherit',
+  textAlign: 'left',
+  cursor: 'pointer',
+}
+/** inventory `.chevron` + `[data-open=true]` rotation; `margin-left:auto` right-pushes it. */
+const chevronWrapStyle: CSSProperties = {
+  display: 'inline-flex',
+  flex: 'none',
+  marginLeft: 'auto',
   color: 'var(--dsw-alias-label-tertiary)',
 }
+/** inventory `.phaseDot` — the status dot's own slot. */
+const dotSlotStyle: CSSProperties = { flex: 'none', display: 'inline-flex' }
+/** inventory `.cardDetails` — the expanded panel (its rows carry `.details`' 8px step). */
+const cardDetailsStyle: CSSProperties = {
+  borderTop: '.5px solid var(--dsw-alias-border-l2)',
+  background: 'var(--dsw-alias-bg-module-platform)',
+  padding: '10px 14px 12px',
+}
+/** inventory `.entryValue` code face on the `.cardDescription` 12/18 colour. */
+const targetStyle: CSSProperties = {
+  fontFamily: 'var(--ds-font-family-code)',
+  fontSize: 12,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-tertiary)',
+  overflowWrap: 'anywhere',
+  display: 'block',
+}
+/** inventory `.statusWithDot` + `models`.modelInputChoices wrapping; `.details` margin step. */
+const metaRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  flexWrap: 'wrap',
+  margin: '8px 0 0',
+}
+/** inventory `.statusWithDot` (plus `.status,.failure`'s `margin:0`). */
+const statusLineStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 6, margin: 0 }
+/** inventory `.statusWithDot` + `.details`' margin step between detail rows. */
+const probeLineStyle: CSSProperties = { ...statusLineStyle, margin: '8px 0 0' }
+/** inventory `.status` — the probe sentence. */
+const statusTextStyle: CSSProperties = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, lineHeight: '20px' }
+/** inventory `.failure` — the probe failure colour on the same 13/20 scale. */
+const failureStyle: CSSProperties = { ...statusTextStyle, color: 'var(--dsw-alias-state-error-primary)' }
+/** models `.error` — the page-level failure line. */
+const errorLineStyle: CSSProperties = {
+  color: 'var(--dsw-alias-state-error-primary)',
+  margin: 0,
+  fontSize: 12,
+  lineHeight: '18px',
+}
+/** models `.modelEmpty` — the empty-state box. */
+const emptyBoxStyle: CSSProperties = {
+  border: '1px dashed var(--dsw-alias-border-l3)',
+  borderRadius: 'var(--dsw-radius-lg)',
+  textAlign: 'center',
+  padding: 12,
+  color: 'var(--dsw-alias-label-tertiary)',
+  margin: 0,
+  fontSize: 12,
+  lineHeight: '18px',
+}
+/** general `.actions` / models `.rowHead` — one centred row for mixed content. */
 const footerStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }
-const footerPathStyle: CSSProperties = { fontSize: 11.5, maxWidth: '100%' }
-const dangerButtonStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
-/** A textarea, which the kit does not ship; dressed with the Input tokens. */
+/** inventory `.cardDescription` scale on a path label. */
+const footerPathStyle: CSSProperties = { fontSize: 12, lineHeight: '18px', maxWidth: '100%' }
+/** models `.field` — a label/control/hint stack (`min-width:0` from `.rowIdentity`). */
+const fieldStyle: CSSProperties = { flexDirection: 'column', gap: 6, display: 'flex', flex: 1, minWidth: 0 }
+/** models `.fieldLabel`. */
+const labelStyle: CSSProperties = {
+  color: 'var(--dsw-alias-label-secondary)',
+  alignItems: 'center',
+  gap: 10,
+  fontSize: 12,
+  fontWeight: 500,
+  lineHeight: '18px',
+  display: 'inline-flex',
+}
+/** models `.error` for the host's per-field message. */
+const hintStyle: CSSProperties = {
+  color: 'var(--dsw-alias-state-error-primary)',
+  margin: 0,
+  fontSize: 12,
+  lineHeight: '18px',
+}
+/** models `.rowHead` gap 10 with `.modelRow`'s centred alignment between two field stacks. */
+const fieldRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 10 }
+/** models `.editorHeader` / `.editorTitle`. */
+const editorHeaderStyle: CSSProperties = { alignItems: 'baseline', gap: 8, display: 'flex' }
+const editorTitleStyle: CSSProperties = {
+  color: 'var(--dsw-alias-label-primary)',
+  fontSize: 14,
+  fontWeight: 500,
+  lineHeight: '22px',
+}
+/** models `.editorActions`. */
+const formActionsStyle: CSSProperties = { justifyContent: 'flex-end', gap: 8, display: 'flex' }
+/** models `.input` tokens; the kit ships no textarea, so this is the one native control. */
 const textareaStyle: CSSProperties = {
   boxSizing: 'border-box',
   width: '100%',
   minHeight: 64,
-  padding: '6px 8px',
-  border: '0.5px solid var(--dsw-alias-border-l4)',
+  padding: '6px 10px',
+  border: '.5px solid var(--dsw-alias-border-l4)',
   borderRadius: 'var(--dsw-radius-md)',
   background: 'var(--dsw-alias-bg-layer-1)',
   color: 'var(--dsw-alias-label-primary)',
   font: 'inherit',
-  fontSize: 13,
-  lineHeight: '20px',
+  fontSize: 14,
+  lineHeight: '22px',
   resize: 'vertical',
 }
+/** models `.dangerButton` colour on the kit's ghost button. */
+const dangerButtonStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
 
 const TRANSPORT_OPTIONS: readonly SegmentedControlOption<McpTransport>[] = [
   { value: 'streamable-http', label: 'streamable-http' },
@@ -346,18 +479,26 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     return { total: servers.length, enabled, connected, failed }
   }, [servers])
 
+  /** models `.intro` sentence: total, connected, failures when any, enabled ratio. */
+  const summaryText = useMemo(() => {
+    const parts = [
+      t('total', { count: String(summary.total) }),
+      t('connected', { count: String(summary.connected) }),
+    ]
+    if (summary.failed > 0) parts.push(t('failed', { count: String(summary.failed) }))
+    parts.push(t('enabledOf', { count: String(summary.enabled), total: String(summary.total) }))
+    return parts.join(' · ')
+  }, [summary, t])
+
   return (
-    <div style={sectionStyle}>
-      <div style={headStyle}>
-        <span style={headTitleStyle}>{t('title')}</span>
-        <span style={headSubStyle}>{t('total', { count: String(summary.total) })}</span>
-      </div>
+    <section style={sectionStyle}>
+      <h2 style={titleStyle}>{t('title')}</h2>
+      <p style={introStyle}>{summaryText}</p>
 
       <div style={toolbarStyle}>
         <Button
           variant="primary"
-          size="sm"
-          icon={<IconPlusOutlineRegular size={14} />}
+          icon={<IconPlusOutlineRegular size={16} />}
           onClick={beginAdd}
           disabled={busy !== null || formOpen}
         >
@@ -365,149 +506,93 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
         </Button>
         <Button
           variant="outline"
-          size="sm"
-          icon={loading ? <StateDot state="ongoing" size={14} /> : <IconRefreshOutlineRegular size={14} />}
+          icon={loading ? <StateDot state="ongoing" size={14} /> : <IconRefreshOutlineRegular size={16} />}
           onClick={() => void refresh()}
           disabled={busy !== null || loading}
         >
           {t('refresh')}
         </Button>
-        <span style={spacerStyle} />
-        <span style={metaStyle}>
-          <span>{t('connected', { count: String(summary.connected) })}</span>
-          {summary.failed > 0 ? <span style={metaBadStyle}>{t('failed', { count: String(summary.failed) })}</span> : null}
-          <span>{t('enabledOf', { count: String(summary.enabled), total: String(summary.total) })}</span>
-        </span>
       </div>
 
-      {error !== null ? (
-        <div style={errorStyle} role="alert">
-          <IconWarningOutlineRegular size={14} />
-          <span>{error}</span>
-        </div>
-      ) : null}
-
-      {form?.mode === 'add' ? (
-        <ServerForm
-          key="add"
-          t={t}
-          initial={undefined}
-          busy={busy !== null}
-          onCancel={closeForm}
-          onSaved={() => savedForm('add')}
-        />
-      ) : null}
+      {error !== null ? <p style={errorLineStyle} role="alert">{error}</p> : null}
 
       {loading && servers.length === 0 && !formOpen ? (
-        <div style={emptyStyle}>
-          <StateDot state="ongoing" size={14} />
-          <span>{t('loading')}</span>
-        </div>
+        <p style={statusLineStyle} role="status">
+          <span style={dotSlotStyle}><StateDot state="ongoing" size={10} /></span>
+          <span style={statusTextStyle}>{t('loading')}</span>
+        </p>
       ) : null}
 
       {!loading && servers.length === 0 && !formOpen ? (
-        <div style={emptyStyle}>
-          <span>{t('empty')}</span>
-          <span>{t('emptyHint')}</span>
-        </div>
+        <p style={emptyBoxStyle}>
+          {t('empty')} {t('emptyHint')}
+        </p>
       ) : null}
 
-      {servers.map((server) => {
-        if (form?.mode === 'edit' && form.server.id === server.id) {
-          return (
+      <ul style={rowsStyle}>
+        {form?.mode === 'add' ? (
+          <li style={addCardStyle} key="add">
             <ServerForm
-              key={server.id}
               t={t}
-              initial={server}
+              initial={undefined}
               busy={busy !== null}
               onCancel={closeForm}
-              onSaved={() => savedForm('edit')}
+              onSaved={() => savedForm('add')}
             />
-          )
-        }
+          </li>
+        ) : null}
 
-        const status = statusOf(server)
-        const probe = probes[server.id]
-        const probing = busy === `probe:${server.id}`
-        const target = targetOf(server)
-        return (
-          <div style={cardStyle} key={server.id}>
-            <DisclosureRow
-              icon={server.transport === 'stdio'
-                ? <IconCodeOutlineRegular size={16} />
-                : <IconGlobeOutlineRegular size={16} />}
-              title={displayName(server)}
-              open={expanded[server.id] === true}
-              expandable
-              expandOnRowClick
-              running={probing}
-              onToggle={() => toggleExpanded(server.id)}
-              collapsedContent={(
-                <span style={statusGroupStyle}>
-                  <StateDot state={status.dot} size={8} />
-                  <Tag tone={status.tone}>
-                    {t(status.key, status.count !== undefined ? { count: status.count } : undefined)}
-                  </Tag>
-                </span>
-              )}
+        {servers.map((server) => {
+          const status = statusOf(server)
+          const statusText = t(status.key, status.count !== undefined ? { count: status.count } : undefined)
+          const editing = form?.mode === 'edit' && form.server.id === server.id
+          const open = expanded[server.id] === true
+          const probe = probes[server.id]
+          const probing = busy === `probe:${server.id}`
+          const failed = server.enabled && server.fiberPhase === 'failed'
+          const regionId = `mcp-details-${server.id}`
+          const target = targetOf(server)
+          return (
+            <li
+              style={failed ? rowCardFailedStyle : open ? rowCardOpenStyle : rowCardStyle}
+              key={server.id}
+              data-open={open ? 'true' : undefined}
+              data-failed={failed ? 'true' : undefined}
             >
-              <div style={cardBodyStyle}>
-                <span style={targetStyle} title={target}>
-                  {target || (server.transport === 'stdio' ? 'stdio' : 'streamable-http')}
-                </span>
-
-                <span style={tagRowStyle}>
-                  <Tag tone="quiet">{server.transport}</Tag>
-                  <Tag tone="quiet">{t('toolCount', { count: String(server.toolCount) })}</Tag>
-                  <Tag tone="outline">{server.id}</Tag>
-                  {!server.userManaged ? <Tag tone="quiet">{t('bundleDefined')}</Tag> : null}
-                  {server.failOnStartupError === true ? <Tag tone="quiet">{t('fieldFailStartup')}</Tag> : null}
-                  {server.reconnect?.enabled === false ? <Tag tone="quiet">{t('reconnectOff')}</Tag> : null}
-                  {server.ownerPackage !== MCP_CLIENT_PACKAGE
-                    ? <Tag tone="info">{server.ownerPackage}</Tag>
-                    : null}
-                </span>
-
-                {probe !== undefined ? (
-                  probe.skipped === true ? (
-                    <span style={probeStyle}>
-                      <Tag tone="warning">{t('probeSkipped')}</Tag>
-                      <span style={probeNoteStyle}>{probe.error ?? ''}</span>
-                    </span>
-                  ) : probe.ok ? (
-                    <span style={probeStyle}>
-                      <IconCheckCircleFillRegular size={14} />
-                      <span style={probeOkStyle}>
-                        {t('probeOk', {
-                          ms: String(probe.latencyMs),
-                          count: probe.toolCount !== undefined ? String(probe.toolCount) : '?',
-                        })}
-                      </span>
-                    </span>
-                  ) : (
-                    <span style={probeStyle}>
-                      <IconWarningOutlineRegular size={14} />
-                      <span style={probeBadStyle}>
-                        {t('probeFail', { error: probe.error ?? 'failed', ms: String(probe.latencyMs) })}
-                      </span>
-                    </span>
-                  )
-                ) : null}
-
-                <span style={actionsStyle}>
-                  <span style={switchGroupStyle}>
-                    <Switch
-                      checked={server.enabled}
-                      label={t('enable')}
-                      disabled={actionsDisabled}
-                      onChange={() => toggleEnabled(server)}
-                    />
-                    <span style={switchLabelStyle}>{server.enabled ? t('disable') : t('enable')}</span>
+              <div style={rowHeadStyle}>
+                {/*
+                 * The title area is the disclosure toggle (inventory
+                 * `cardContent` as a bare button), so the title keeps the
+                 * settings-page scale. The controls live outside it in
+                 * `rowActions`: clicking one never toggles the card.
+                 */}
+                <button
+                  type="button"
+                  style={rowToggleStyle}
+                  aria-expanded={open}
+                  aria-controls={open ? regionId : undefined}
+                  onClick={() => toggleExpanded(server.id)}
+                >
+                  <span style={rowNameStyle}>{displayName(server)}</span>
+                  <span style={rowTagStyle}>{server.id}</span>
+                  <Tag tone={status.tone}>{statusText}</Tag>
+                  <span style={{ ...chevronWrapStyle, transform: open ? 'rotate(180deg)' : 'none' }}>
+                    <IconChevronDownOutlineRegular size={12} />
                   </span>
+                </button>
+
+                <span style={rowActionsStyle}>
+                  <Switch
+                    checked={server.enabled}
+                    label={t('enable')}
+                    title={server.enabled ? t('disable') : t('enable')}
+                    disabled={actionsDisabled}
+                    onChange={() => toggleEnabled(server)}
+                  />
                   <Button
                     variant="outline"
                     size="sm"
-                    icon={probing ? <StateDot state="ongoing" size={14} /> : <IconPlayOutlineRegular size={14} />}
+                    icon={probing ? <StateDot state="ongoing" size={14} /> : undefined}
                     onClick={() => testConnection(server)}
                     disabled={actionsDisabled}
                   >
@@ -516,13 +601,11 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                   <Button
                     variant="outline"
                     size="sm"
-                    icon={<IconEditOutlineRegular size={14} />}
                     onClick={() => beginEdit(server)}
                     disabled={actionsDisabled}
                   >
                     {t('edit')}
                   </Button>
-                  <span style={spacerStyle} />
                   <Tooltip label={server.userManaged ? t('remove') : t('bundleDefined')}>
                     <Button
                       variant="ghost"
@@ -537,10 +620,65 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                   </Tooltip>
                 </span>
               </div>
-            </DisclosureRow>
-          </div>
-        )
-      })}
+
+              {editing ? (
+                <div style={editorStyle}>
+                  <ServerForm
+                    t={t}
+                    initial={server}
+                    busy={busy !== null}
+                    onCancel={closeForm}
+                    onSaved={() => savedForm('edit')}
+                  />
+                </div>
+              ) : open ? (
+                <div style={cardDetailsStyle} id={regionId}>
+                  <span style={targetStyle} title={target}>
+                    {target || (server.transport === 'stdio' ? 'stdio' : 'streamable-http')}
+                  </span>
+
+                  <span style={metaRowStyle}>
+                    <Tag tone="quiet">{server.transport}</Tag>
+                    <Tag tone="quiet">{t('toolCount', { count: String(server.toolCount) })}</Tag>
+                    {!server.userManaged ? <Tag tone="quiet">{t('bundleDefined')}</Tag> : null}
+                    {server.failOnStartupError === true ? <Tag tone="quiet">{t('fieldFailStartup')}</Tag> : null}
+                    {server.reconnect?.enabled === false ? <Tag tone="quiet">{t('reconnectOff')}</Tag> : null}
+                    {server.ownerPackage !== MCP_CLIENT_PACKAGE
+                      ? <Tag tone="info">{server.ownerPackage}</Tag>
+                      : null}
+                  </span>
+
+                  {probe !== undefined ? (
+                    probe.skipped === true ? (
+                      <p style={probeLineStyle}>
+                        <span style={dotSlotStyle}><StateDot state="warning" size={10} /></span>
+                        <span style={statusTextStyle}>{t('probeSkipped')} {probe.error ?? ''}</span>
+                      </p>
+                    ) : probe.ok ? (
+                      <p style={probeLineStyle}>
+                        <span style={dotSlotStyle}><StateDot state="done" size={10} /></span>
+                        <span style={statusTextStyle}>
+                          {t('probeOk', {
+                            ms: String(probe.latencyMs),
+                            count: probe.toolCount !== undefined ? String(probe.toolCount) : '?',
+                          })}
+                        </span>
+                      </p>
+                    ) : (
+                      <p style={probeLineStyle}>
+                        <span style={dotSlotStyle}><StateDot state="error" size={10} /></span>
+                        <span style={failureStyle}>
+                          {t('probeFail', { error: probe.error ?? 'failed', ms: String(probe.latencyMs) })}
+                        </span>
+                      </p>
+                    )
+                  ) : null}
+                </div>
+              ) : null}
+            </li>
+          )
+        })}
+      </ul>
 
       {patchInfo !== null ? (
         <div style={footerStyle}>
@@ -566,7 +704,7 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
         onCancel={() => setRemoving(null)}
         onConfirm={confirmRemove}
       />
-    </div>
+    </section>
   )
 }
 
@@ -741,10 +879,12 @@ function ServerForm({ t, initial, busy, onCancel, onSaved }: ServerFormProps): J
   const locked = saving || busy
 
   return (
-    <div style={formStyle}>
-      <span style={formTitleStyle}>
-        {editing ? t('formEditTitle', { name: initial.serverName }) : t('formAddTitle')}
-      </span>
+    <>
+      <div style={editorHeaderStyle}>
+        <span style={editorTitleStyle}>
+          {editing ? t('formEditTitle', { name: initial.serverName }) : t('formAddTitle')}
+        </span>
+      </div>
 
       <div style={fieldRowStyle}>
         <Field labelFor="dshmcp-id" label={t('fieldId')} hint={err('id')}>
@@ -879,12 +1019,7 @@ function ServerForm({ t, initial, busy, onCancel, onSaved }: ServerFormProps): J
         </div>
       </div>
 
-      {submitError !== null ? (
-        <div style={errorStyle} role="alert">
-          <IconWarningOutlineRegular size={14} />
-          <span>{submitError}</span>
-        </div>
-      ) : null}
+      {submitError !== null ? <p style={errorLineStyle} role="alert">{submitError}</p> : null}
 
       <div style={formActionsStyle}>
         <Button variant="outline" size="sm" onClick={onCancel} disabled={saving}>
@@ -900,6 +1035,6 @@ function ServerForm({ t, initial, busy, onCancel, onSaved }: ServerFormProps): J
           {editing ? t('save') : t('addServer')}
         </Button>
       </div>
-    </div>
+    </>
   )
 }
