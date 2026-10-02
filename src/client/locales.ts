@@ -41,7 +41,6 @@ export type McpManagerKeys =
   | 'statusNotLoaded'
   | 'connecting'
   | 'toolCount'
-  | 'bundleDefined'
   | 'probeOk'
   | 'probeFail'
   | 'probeSkipped'
@@ -108,7 +107,6 @@ export const zh: McpManagerDict = {
   statusNotLoaded: '未加载',
   connecting: '连接中',
   toolCount: '{count} 个工具',
-  bundleDefined: 'bundle 定义',
   probeOk: '已连接，耗时 {ms}ms · {count} 个工具',
   probeFail: '{error}（{ms}ms）',
   probeSkipped: '未检测',
@@ -167,7 +165,6 @@ export const en: McpManagerDict = {
   statusNotLoaded: 'Not loaded',
   connecting: 'Connecting',
   toolCount: '{count} tools',
-  bundleDefined: 'bundle-defined',
   probeOk: 'Connected in {ms}ms · {count} tools',
   probeFail: '{error} ({ms}ms)',
   probeSkipped: 'Not probed',

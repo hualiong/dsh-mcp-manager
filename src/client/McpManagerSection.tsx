@@ -897,7 +897,6 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                     probing={probing}
                     onTest={() => testConnection(server)}
                     onRemove={() => requestRemove(server)}
-                    removeLabel={server.userManaged ? t('remove') : t('bundleDefined')}
                     onCancel={() => closeCard(server.id)}
                     onSaved={() => savedEdit(server.id)}
                   />
@@ -950,8 +949,6 @@ interface ServerFormProps {
   onTest?: (() => void) | undefined
   /** Edit only: open the remove confirmation (panel header, right). */
   onRemove?: (() => void) | undefined
-  /** Tooltip of the header's remove action: the action, or why the row is bundle-owned. */
-  removeLabel?: string | undefined
   onCancel: () => void
   /** Receives the host's reply and the submitted payload (the add echo needs both). */
   onSaved: (result: unknown, draft: { id: string; config: McpServerConfig }) => void
@@ -1135,7 +1132,6 @@ export function ServerForm({
   probing,
   onTest,
   onRemove,
-  removeLabel,
   onCancel,
   onSaved,
 }: ServerFormProps): JSX.Element {
@@ -1175,18 +1171,16 @@ export function ServerForm({
           {editing ? t('formEditTitle', { name: initial.serverName }) : t('formAddTitle')}
         </span>
         {onRemove !== undefined ? (
-          <Tooltip label={removeLabel ?? t('remove')}>
-            <Button
-              variant="ghost"
-              size="sm"
-              style={dangerButtonStyle}
-              icon={<IconTrashOutlineRegular size={14} />}
-              onClick={onRemove}
-              disabled={locked}
-            >
-              {t('remove')}
-            </Button>
-          </Tooltip>
+          <Button
+            variant="ghost"
+            size="sm"
+            style={dangerButtonStyle}
+            icon={<IconTrashOutlineRegular size={14} />}
+            onClick={onRemove}
+            disabled={locked}
+          >
+            {t('remove')}
+          </Button>
         ) : null}
       </div>
 
