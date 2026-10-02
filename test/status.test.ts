@@ -333,6 +333,52 @@ test('a partial top-level override row merges over the live entry', () => {
   assert.equal(github.userManaged, true)
 })
 
+test('an explicit file `disabled` wins over the live fiber', () => {
+  // The live cloudflare entry is enabled and active; the file says disabled.
+  const rows = readMcpPatchRows([
+    { id: 'oauth-mcp-cloudflare', name: MCP_OAUTH_CLIENT_PACKAGE, disabled: true },
+    { id: 'mcp-github', name: MCP_CLIENT_PACKAGE, disabled: false },
+  ])
+  const servers = listMcpServers(fakeCtx(), rows)
+
+  const cloudflare = servers.find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.equal(cloudflare.enabled, false, 'the file row is what the user just chose')
+  assert.equal(cloudflare.fiberPhase, 'active', 'the phase still describes the running bridge')
+  assert.equal(cloudflare.toolCount, 1, 'the tool count still describes the running bridge')
+  assert.equal(cloudflare.userManaged, true)
+
+  // ... and the other direction: the live github entry is disabled, the file enables it.
+  const github = servers.find((server) => server.id === 'mcp-github')
+  assert.equal(github.enabled, true)
+  assert.equal(github.fiberPhase, 'active')
+  assert.equal(github.toolCount, 2)
+
+  // A live entry with no file row keeps reporting the live value.
+  const idle = servers.find((server) => server.id === 'no-fiber')
+  assert.equal(idle.enabled, true)
+})
+
+test('a file row without a `disabled` key falls back to the live fiber', () => {
+  const rows = readMcpPatchRows([
+    { id: 'mcp-github', name: MCP_CLIENT_PACKAGE, config: { url: 'https://override.example/mcp' } },
+    {
+      insert: [{
+        id: 'oauth-mcp-cloudflare',
+        name: MCP_OAUTH_CLIENT_PACKAGE,
+        config: { url: 'https://mcp.cloudflare.com/mcp' },
+      }],
+    },
+  ])
+  const servers = listMcpServers(fakeCtx(), rows)
+
+  const github = servers.find((server) => server.id === 'mcp-github')
+  assert.equal(github.enabled, false, 'no file flag: the live disabled fiber is the only answer')
+  assert.equal(github.url, 'https://override.example/mcp')
+
+  const cloudflare = servers.find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.equal(cloudflare.enabled, true)
+})
+
 test('a file row with no live entry yet is listed as not loaded', () => {
   const rows = readMcpPatchRows([{
     insert: [{

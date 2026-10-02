@@ -114,7 +114,7 @@ export function listMcpServers(
       ...reportedConfig(entry.options.config, fileRow, oauth),
       id,
       ownerPackage,
-      enabled: !entry.disabled,
+      enabled: fileEnabled(fileRow?.disabled, !entry.disabled),
       fiberPhase: entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state] ?? null,
       // Tools belong to the running bridge, so count them under the name the
       // live entry still runs, not the name the file was just edited to.
@@ -133,13 +133,25 @@ export function listMcpServers(
       ...config,
       id: row.id,
       ownerPackage: row.ownerPackage,
-      enabled: row.disabled !== true,
+      // No live fiber yet, so the file row is the only source of intent.
+      enabled: fileEnabled(row.disabled, true),
       fiberPhase: null,
       toolCount: 0,
       userManaged: true,
     })
   }
   return servers
+}
+
+/**
+ * `enabled` as the user last stated it. `setMcpEnabled` always writes an
+ * explicit boolean, so a file row that states one is what the panel just chose
+ * and wins until the loader applies the file; a row without the key leaves the
+ * live fiber as the only answer. The fiber phase and tool count stay live in
+ * both cases, because they describe the running bridge.
+ */
+function fileEnabled(fileDisabled: boolean | undefined, liveEnabled: boolean): boolean {
+  return fileDisabled === undefined ? liveEnabled : !fileDisabled
 }
 
 /**

@@ -283,7 +283,24 @@ test('add writes an official-client insert row and rejects duplicates', async ()
     url: 'https://example.com/mcp',
   }
   const added = await endpoint(route, 'add', { id: 'mcp-new', config })
-  assert.deepEqual(added.json, { ok: true, value: { added: 'mcp-new' } })
+  assert.equal(added.json.ok, true)
+  assert.equal(added.json.value.added, 'mcp-new')
+
+  const created = added.json.value.row
+  assert.equal(created.id, 'mcp-new')
+  assert.equal(created.serverName, 'newserver')
+  assert.equal(created.transport, 'streamable-http')
+  assert.equal(created.url, 'https://example.com/mcp')
+  assert.equal(created.ownerPackage, '@deepseek-ai/dsh-mcp-client')
+  assert.equal(created.enabled, true)
+  assert.equal(created.fiberPhase, null)
+  assert.equal(created.toolCount, 0)
+  assert.equal(created.userManaged, true)
+
+  // The reply is the row a `list` would report, so the panel can render it
+  // without a second read.
+  const listed = listOf(await endpoint(route, 'list', null)).find((server) => server.id === 'mcp-new')
+  assert.deepEqual(created, listed)
 
   const rows = readPatchList(patchFile)
   const inserted = rows.at(-1).insert[0]
@@ -400,6 +417,24 @@ test('probe still connects to a stdio server for real', async () => {
   assert.equal(result.ok, true, result.error)
   assert.equal(result.toolCount, 1)
   assert.ok(result.latencyMs >= 0)
+})
+
+test('list reports the file `enabled` while the fiber still disagrees', async () => {
+  const { route, patchFile } = harness()
+  // The live github entry is disabled; enabling it must show up immediately.
+  assert.equal(listOf(await endpoint(route, 'list', null)).find((s) => s.id === 'mcp-github').enabled, false)
+
+  await endpoint(route, 'setEnabled', { id: 'mcp-github', enabled: true })
+  assert.equal(readPatchList(patchFile).find((row) => row.id === 'mcp-github').disabled, false)
+
+  const enabled = listOf(await endpoint(route, 'list', null)).find((server) => server.id === 'mcp-github')
+  assert.equal(enabled.enabled, true, 'the file value wins over the stale fiber')
+  assert.equal(enabled.fiberPhase, 'active', 'the phase stays live')
+  assert.equal(enabled.toolCount, 1, 'the tool count stays live')
+
+  await endpoint(route, 'setEnabled', { id: 'mcp-github', enabled: false })
+  const disabled = listOf(await endpoint(route, 'list', null)).find((server) => server.id === 'mcp-github')
+  assert.equal(disabled.enabled, false)
 })
 
 test('list reflects a just-saved edit without waiting for the loader', async () => {

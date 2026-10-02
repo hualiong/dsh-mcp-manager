@@ -259,8 +259,11 @@ async function dispatch(
           `serverName "${config.serverName}" is already used by another MCP server`,
         )
       }
-      editPatchList(patchFile, (rows) => addMcpRow(rows, id, config))
-      return ok({ added: id })
+      const rows = editPatchList(patchFile, (current) => addMcpRow(current, id, config))
+      // Hand back the row as a `list` would report it, so the panel can render
+      // the new server immediately instead of waiting for the next read.
+      const row = listMcpServers(ctx, readMcpPatchRows(rows)).find((server) => server.id === id)
+      return ok(row === undefined ? { added: id } : { added: id, row })
     }
     case 'remove': {
       const id = readId(payload)
