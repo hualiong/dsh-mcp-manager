@@ -30,6 +30,9 @@ import type { Context } from '@deepseek-ai/cordis'
 // Type-only: loads the `Context { connection }` declaration merge into the program.
 import type {} from '@deepseek-ai/dsh-client-connection'
 import {
+  EVENT_CHANGED,
+  EVENT_CHANNEL,
+  EVENT_READY,
   MCP_CLIENT_PACKAGE,
   MCP_OAUTH_CLIENT_PACKAGE,
   RPC_CHANNEL,
@@ -119,6 +122,143 @@ const OAUTH_PROBE_ERROR =
 /** Path segments accepted as an endpoint name. */
 const ENDPOINT_SEGMENT_RE = /^[A-Za-z0-9_$.-]+$/
 
+/** Response headers of the event stream. */
+const EVENT_HEADERS = {
+  'content-type': 'text/event-stream',
+  'cache-control': 'no-store',
+  'connection': 'keep-alive',
+} as const
+
+/**
+ * How often an open stream is examined for a state change. The tick exists only
+ * while at least one stream is open (see {@link createChangeChannel}).
+ */
+const TICK_MS = 1000
+/** Every n-th tick writes a comment so an idle stream is not reaped (~20s). */
+const PING_TICKS = 20
+/** Keep-alive comment; SSE ignores it, proxies and idle timeouts do not. */
+const PING_FRAME = ': ping\n\n'
+
+/** One SSE frame carrying a single event type. */
+function frame(type: string): string {
+  return `data: ${JSON.stringify({ type })}\n\n`
+}
+
+/** The panel's change channel: every open event stream plus its one timer. */
+interface ChangeChannel {
+  /** Hold one response open as an event stream and start the tick on demand. */
+  open(res: ServerResponse): void
+  /** Tell every open stream to re-read; never throws into the caller. */
+  broadcast(): void
+  /** End every stream and stop the timer (fiber dispose). */
+  close(): void
+}
+
+/**
+ * Create the panel's server-sent-events channel.
+ *
+ * Frames carry no state — they are nudges to re-read `list` — so a frame lost
+ * between reads costs latency, never correctness, and the `ready` frame a
+ * reconnecting client receives closes the window it slept through.
+ *
+ * The tick timer is created on the first subscriber and cleared with the last:
+ * with no stream open there is no timer at all, so an unopened panel costs
+ * nothing, and a disposed fiber leaves nothing scheduled.
+ * @param ctx - plugin context (the loader and tool registry the tick reads).
+ * @param patchFile - user patch layer the tick re-reads.
+ * @returns the channel handle owned by the plugin fiber.
+ */
+function createChangeChannel(ctx: Context, patchFile: string): ChangeChannel {
+  const streams = new Set<ServerResponse>()
+  let timer: ReturnType<typeof setInterval> | undefined
+  let ticks = 0
+  let signature: string | undefined
+
+  const stop = (): void => {
+    if (timer === undefined) return
+    clearInterval(timer)
+    timer = undefined
+  }
+
+  /** Write one frame to every live stream; never throws. */
+  const write = (payload: string): void => {
+    for (const stream of [...streams]) {
+      if (stream.destroyed || stream.writableEnded) {
+        streams.delete(stream)
+        continue
+      }
+      try {
+        stream.write(payload)
+      } catch {
+        // A socket that died between the check and the write: drop it rather
+        // than let a response teardown surface in a request handler.
+        streams.delete(stream)
+      }
+    }
+    if (streams.size === 0) stop()
+  }
+
+  /** The reported state as one string; undefined when it cannot be read. */
+  const readSignature = (): string | undefined => {
+    try {
+      return JSON.stringify(listMcpServers(ctx, readMcpPatchRows(readPatchList(patchFile))))
+    } catch {
+      // A malformed patch file is a read failure, not a change: report nothing
+      // and keep the previous signature so the next tick retries.
+      return undefined
+    }
+  }
+
+  const tick = (): void => {
+    try {
+      ticks += 1
+      if (ticks % PING_TICKS === 0) write(PING_FRAME)
+      const next = readSignature()
+      if (next !== undefined && next !== signature) {
+        signature = next
+        write(frame(EVENT_CHANGED))
+      }
+    } catch (error) {
+      // Runs on a timer: an escaping error would be an uncaught exception.
+      ctx.logger.warn('mcp-manager: event stream tick failed: %s', String(error))
+    }
+  }
+
+  const open = (res: ServerResponse): void => {
+    res.writeHead(200, EVENT_HEADERS)
+    try {
+      res.write(frame(EVENT_READY))
+    } catch {
+      res.end()
+      return
+    }
+    streams.add(res)
+    res.on('close', () => {
+      streams.delete(res)
+      if (streams.size === 0) stop()
+    })
+    // Baseline the comparison at the first subscriber: the client reads the
+    // list as it connects, so the state it just saw must not be re-announced.
+    if (streams.size === 1) signature = readSignature()
+    if (timer === undefined) timer = setInterval(tick, TICK_MS)
+  }
+
+  const close = (): void => {
+    stop()
+    const held = [...streams]
+    streams.clear()
+    for (const stream of held) {
+      try {
+        stream.end()
+      } catch {
+        // Disposal continues regardless: every stream must be released.
+      }
+    }
+  }
+
+  return { open, broadcast: () => write(frame(EVENT_CHANGED)), close }
+}
+
 /**
  * Plugin body: mount the panel's HTTP route and dispatch MCP management
  * commands.
@@ -129,29 +269,38 @@ export function apply(ctx: Context, rawConfig?: McpManagerRowConfig): void {
   const patchFile = resolvePatchPath(rawConfig?.patchFile)
   const logger = ctx.logger('mcp-manager')
 
-  ctx.effect(
-    () => ctx.webServer.register({
+  ctx.effect(() => {
+    const channel = createChangeChannel(ctx, patchFile)
+    const disposeRoute = ctx.webServer.register({
       kind: 'prefix',
       path: RPC_CHANNEL,
-      handler: (req, res) => handleRequest(ctx, patchFile, req, res),
-    }),
-    'mcp-manager: http route',
-  )
+      handler: (req, res) => handleRequest(ctx, patchFile, channel, req, res),
+    })
+    return () => {
+      // Fiber dispose must release every held-open response, not just stop
+      // serving new ones.
+      channel.close()
+      disposeRoute()
+    }
+  }, 'mcp-manager: http route')
 
   logger.info('mcp-manager active (patch file: %s)', patchFile)
 }
 
 /**
  * Serve one request: apply Connection's Host/Origin + browser-auth fence, then
- * dispatch `POST /mcp-manager/<endpoint>`.
+ * either hold `GET /mcp-manager/events` open as an event stream or dispatch
+ * `POST /mcp-manager/<endpoint>`.
  * @param ctx - plugin context.
  * @param patchFile - user patch layer to read and edit.
+ * @param channel - change channel the request may subscribe to.
  * @param req - incoming HTTP request.
  * @param res - response owned for this request.
  */
 export async function handleRequest(
   ctx: Context,
   patchFile: string,
+  channel: ChangeChannel,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
@@ -162,7 +311,13 @@ export async function handleRequest(
     return
   }
 
-  const endpoint = req.method === 'POST' ? endpointOf(req.url) : undefined
+  const pathname = pathnameOf(req.url)
+  if (req.method === 'GET' && pathname === EVENT_CHANNEL) {
+    channel.open(res)
+    return
+  }
+
+  const endpoint = req.method === 'POST' ? endpointOf(pathname) : undefined
   if (endpoint === undefined) {
     res.writeHead(404)
     res.end()
@@ -180,7 +335,7 @@ export async function handleRequest(
 
   let result: RpcResult<unknown>
   try {
-    result = await dispatch(ctx, patchFile, endpoint as McpEndpoint, payload)
+    result = await dispatch(ctx, patchFile, channel, endpoint as McpEndpoint, payload)
   } catch (error) {
     // Endpoint failures are data, not transport failures: report them in the
     // envelope so the panel can render them.
@@ -191,15 +346,18 @@ export async function handleRequest(
   res.end(JSON.stringify(result))
 }
 
-/** Resolve the endpoint segment of `/mcp-manager/<segment>`, or undefined. */
-function endpointOf(rawUrl: string | undefined): string | undefined {
-  let pathname: string
+/** Pathname of one request URL, or undefined when it cannot be parsed. */
+function pathnameOf(rawUrl: string | undefined): string | undefined {
   try {
-    pathname = new URL(rawUrl ?? '/', 'http://localhost').pathname
+    return new URL(rawUrl ?? '/', 'http://localhost').pathname
   } catch {
     return undefined
   }
-  if (!pathname.startsWith(`${RPC_CHANNEL}/`)) return undefined
+}
+
+/** Resolve the endpoint segment of `/mcp-manager/<segment>`, or undefined. */
+function endpointOf(pathname: string | undefined): string | undefined {
+  if (pathname === undefined || !pathname.startsWith(`${RPC_CHANNEL}/`)) return undefined
   const segment = pathname.slice(RPC_CHANNEL.length + 1)
   return ENDPOINT_SEGMENT_RE.test(segment) ? segment : undefined
 }
@@ -229,6 +387,7 @@ function parseEnvelope(text: string): unknown {
 async function dispatch(
   ctx: Context,
   patchFile: string,
+  channel: ChangeChannel,
   endpoint: McpEndpoint,
   payload: unknown,
 ): Promise<RpcResult<unknown>> {
@@ -259,16 +418,15 @@ async function dispatch(
           `serverName "${config.serverName}" is already used by another MCP server`,
         )
       }
-      const rows = editPatchList(patchFile, (current) => addMcpRow(current, id, config))
-      // Hand back the row as a `list` would report it, so the panel can render
-      // the new server immediately instead of waiting for the next read.
-      const row = listMcpServers(ctx, readMcpPatchRows(rows)).find((server) => server.id === id)
-      return ok(row === undefined ? { added: id } : { added: id, row })
+      editPatchList(patchFile, (rows) => addMcpRow(rows, id, config))
+      channel.broadcast()
+      return ok({ added: id })
     }
     case 'remove': {
       const id = readId(payload)
       if (id === undefined) return badRequest()
       editPatchList(patchFile, (rows) => removeMcpRow(rows, id))
+      channel.broadcast()
       return ok({ removed: id })
     }
     case 'setEnabled': {
@@ -279,6 +437,7 @@ async function dispatch(
       // loader skips a row whose `name` does not match its id.
       const owner = findMcpServer(ctx, id)?.ownerPackage
       editPatchList(patchFile, (rows) => setMcpEnabled(rows, id, enabled, owner))
+      channel.broadcast()
       return ok({ id, enabled })
     }
     case 'update': {
@@ -299,6 +458,7 @@ async function dispatch(
         )
       }
       editPatchList(patchFile, (rows) => updateMcpConfig(rows, id, config, owner))
+      channel.broadcast()
       return ok({ updated: id })
     }
     case 'probe': {

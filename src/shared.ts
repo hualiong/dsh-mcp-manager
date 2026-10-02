@@ -27,6 +27,25 @@ export const MCP_CLIENT_PACKAGES: readonly string[] = [
 /** Logical Connection RPC channel registered by the host half. */
 export const RPC_CHANNEL = '/mcp-manager'
 
+/**
+ * Server-sent-events channel served by the host half on its own route, same
+ * origin as the panel, authenticated by the same connection fence as the RPC
+ * endpoints. This is how the plugin pushes without the host-event allowlist
+ * (which fixes the keys of `ctx.remote.$on`): the harness ships the same shape
+ * for its own HMR channel.
+ */
+export const EVENT_CHANNEL = `${RPC_CHANNEL}/events`
+
+/**
+ * The only frame the host sends: a nudge to re-read the list. The panel treats
+ * every event the same way, so a payload it cannot parse is still actionable,
+ * and a missed frame only costs latency — never state.
+ */
+export const EVENT_CHANGED = 'changed'
+
+/** Frame sent once on connect, so a reconnect cannot miss a change it slept through. */
+export const EVENT_READY = 'ready'
+
 /** Supported MCP transports. */
 export type McpTransport = 'stdio' | 'streamable-http'
 

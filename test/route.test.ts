@@ -98,16 +98,17 @@ const TOOL_SCHEMAS = [
 ]
 
 /** Mount the host half over fake sibling services and return the mounted route. */
-function harness({ reject = () => undefined } = {}) {
+function harness({ reject = () => undefined, entries = ENTRIES, tools = TOOL_SCHEMAS } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'mcp-manager-route-'))
   const patchFile = join(dir, 'cordis.patch.yml')
   writeFileSync(patchFile, PATCH_SEED)
 
   const routes = []
+  const disposers = []
   const ctx = {
     logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
-    loader: { entries: () => ENTRIES },
-    tools: { schemas: () => TOOL_SCHEMAS },
+    loader: { entries: () => entries },
+    tools: { schemas: () => tools },
     connection: { requestRejection: (req) => reject(req) },
     webServer: {
       register(route) {
@@ -116,28 +117,59 @@ function harness({ reject = () => undefined } = {}) {
       },
     },
     effect(callback) {
-      callback()
+      disposers.push(callback())
     },
   }
   apply(ctx, { patchFile })
   assert.equal(routes.length, 1, 'apply() must mount exactly one route')
-  return { route: routes[0], patchFile }
+  // Dispose the plugin fiber exactly as the loader would on unload.
+  const dispose = () => { for (const disposer of disposers) disposer() }
+  return { route: routes[0], patchFile, dispose }
 }
 
-/** Fake node:http response capturing status, headers and body. */
+/**
+ * Fake node:http response: captures status, headers, body and every written
+ * frame, and can be closed like a real one (`end` or a client 'close').
+ */
 function fakeRes() {
-  const captured = {}
+  const captured = { status: undefined, headers: undefined, body: undefined }
+  const frames = []
+  const listeners = new Map()
   const res = {
+    destroyed: false,
+    writableEnded: false,
+    failWrites: false,
+    captured,
     writeHead(status, headers) {
       captured.status = status
       captured.headers = headers
       return res
     },
+    write(chunk) {
+      if (res.failWrites) throw new Error('EPIPE')
+      if (res.writableEnded) throw new Error('write after end')
+      frames.push(String(chunk))
+      return true
+    },
     end(text) {
-      captured.body = text
+      res.writableEnded = true
+      if (text !== undefined) captured.body = text
       return res
     },
-    captured,
+    on(event, listener) {
+      listeners.set(event, listener)
+      return res
+    },
+    /** Simulate a client disconnect: node emits 'close' on the response. */
+    clientClose() {
+      res.destroyed = true
+      listeners.get('close')?.()
+      return res
+    },
+    /** Every frame written so far, as one string. */
+    written() {
+      return frames.join('')
+    },
   }
   return res
 }
@@ -161,13 +193,18 @@ function call(route, { url = '/mcp-manager/list', method = 'POST', body = { payl
     } catch {
       json = undefined
     }
-    return { ...res.captured, json }
+    return { ...res.captured, json, res }
   })
 }
 
 /** Call one endpoint and return the parsed reply. */
 function endpoint(route, name, payload) {
   return call(route, { url: `/mcp-manager/${name}`, body: { payload } })
+}
+
+/** Subscribe to the change channel and return the held-open response. */
+function subscribe(route) {
+  return call(route, { url: '/mcp-manager/events', method: 'GET' })
 }
 
 /** The server array of a `list` reply. */
@@ -232,6 +269,191 @@ test('reads the body from a real readable stream', async () => {
   assert.equal(JSON.parse(res.captured.body).ok, true)
 })
 
+test('GET /mcp-manager/events opens a text/event-stream and sends `ready`', async () => {
+  const { route } = harness()
+  const stream = await subscribe(route)
+
+  assert.equal(stream.status, 200)
+  assert.equal(stream.headers['content-type'], 'text/event-stream')
+  assert.equal(stream.headers['cache-control'], 'no-store')
+  assert.equal(stream.headers['connection'], 'keep-alive')
+  assert.equal(stream.res.writableEnded, false, 'the response is held open')
+  assert.equal(stream.res.written(), 'data: {"type":"ready"}\n\n')
+
+  // A second subscriber gets its own ready frame and no extra timer (see the
+  // timer test) — both stay open.
+  const second = await subscribe(route)
+  assert.equal(second.res.written(), 'data: {"type":"ready"}\n\n')
+  assert.equal(second.res.writableEnded, false)
+  stream.res.clientClose()
+  second.res.clientClose()
+})
+
+test('every write pushes a `changed` frame to open streams', async () => {
+  const { route } = harness()
+  const stream = await subscribe(route)
+  const before = stream.res.written().length
+
+  const added = await endpoint(route, 'add', {
+    id: 'mcp-pushed',
+    config: { serverName: 'pushed', transport: 'streamable-http', url: 'https://pushed.example/mcp' },
+  })
+  assert.equal(added.json.ok, true)
+  assert.equal(stream.res.written().slice(before), 'data: {"type":"changed"}\n\n')
+
+  await endpoint(route, 'setEnabled', { id: 'mcp-pushed', enabled: false })
+  await endpoint(route, 'update', {
+    id: 'mcp-pushed',
+    config: { serverName: 'pushed', transport: 'streamable-http', url: 'https://pushed.example/mcp/v2' },
+  })
+  await endpoint(route, 'remove', { id: 'mcp-pushed' })
+  assert.equal(stream.res.written().match(/"type":"changed"/g).length, 4, 'one nudge per write')
+
+  // Reads never nudge.
+  const reads = stream.res.written().length
+  await endpoint(route, 'list', null)
+  await endpoint(route, 'patchInfo', null)
+  assert.equal(stream.res.written().length, reads)
+
+  stream.res.clientClose()
+})
+
+test('a closed stream stops receiving frames', async () => {
+  const { route } = harness()
+  const stream = await subscribe(route)
+  const kept = await subscribe(route)
+
+  stream.res.clientClose()
+  await endpoint(route, 'setEnabled', { id: 'mcp-github', enabled: false })
+
+  assert.equal(stream.res.written(), 'data: {"type":"ready"}\n\n', 'the closed stream is dropped')
+  assert.match(kept.res.written(), /"type":"changed"/, 'the open stream still hears it')
+  kept.res.clientClose()
+})
+
+test('the change timer is created with the first stream and cleared with the last', async (t) => {
+  const setSpy = t.mock.method(globalThis, 'setInterval')
+  const clearSpy = t.mock.method(globalThis, 'clearInterval')
+  const { route } = harness()
+
+  assert.equal(setSpy.mock.callCount(), 0, 'no subscribers means no timer at all')
+
+  const first = await subscribe(route)
+  assert.equal(setSpy.mock.callCount(), 1, 'the first stream starts the timer')
+  const handle = setSpy.mock.calls[0].result
+
+  const second = await subscribe(route)
+  assert.equal(setSpy.mock.callCount(), 1, 'one timer serves every stream')
+
+  first.res.clientClose()
+  assert.equal(clearSpy.mock.callCount(), 0, 'a remaining stream keeps it alive')
+  second.res.clientClose()
+  assert.equal(clearSpy.mock.callCount(), 1, 'the last stream clears it')
+  assert.equal(clearSpy.mock.calls[0].arguments[0], handle, 'the cleared timer is the created one')
+
+  const again = await subscribe(route)
+  assert.equal(setSpy.mock.callCount(), 2, 'a later subscriber starts a fresh timer')
+  again.res.clientClose()
+  assert.equal(clearSpy.mock.callCount(), 2)
+})
+
+test('the tick nudges on a reported-state change and pings an idle stream', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const entries = structuredClone(ENTRIES)
+  const { route, patchFile } = harness({ entries, tools: [{ name: 'mcp__github__search_code' }] })
+
+  const stream = await subscribe(route)
+  assert.equal(stream.res.written(), 'data: {"type":"ready"}\n\n')
+
+  // No change: nothing but the 20s keep-alive comment.
+  t.mock.timers.tick(19_000)
+  assert.equal(stream.res.written(), 'data: {"type":"ready"}\n\n')
+  t.mock.timers.tick(1_000)
+  assert.equal(stream.res.written(), 'data: {"type":"ready"}\n\n: ping\n\n')
+
+  // The live fiber settles: the signature changes and the panel is nudged.
+  entries[1].fiber = { state: 3 }
+  t.mock.timers.tick(1_000)
+  assert.equal(stream.res.written(), 'data: {"type":"ready"}\n\n: ping\n\n' + 'data: {"type":"changed"}\n\n')
+
+  // An out-of-band edit to the patch file is caught by the same comparison.
+  writeFileSync(patchFile, `${PATCH_SEED}- insert:\n    - id: mcp-out-of-band\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: outofband\n        transport: streamable-http\n        url: https://oob.example/mcp\n`)
+  t.mock.timers.tick(1_000)
+  assert.equal(stream.res.written().match(/"type":"changed"/g).length, 2)
+
+  // The last stream is gone: the timer must not be doing work any more.
+  stream.res.clientClose()
+  const settled = stream.res.written()
+  entries[1].fiber = { state: 2 }
+  t.mock.timers.tick(60_000)
+  assert.equal(stream.res.written(), settled)
+})
+
+test('fiber dispose ends every open stream and stops the timer', async (t) => {
+  const setSpy = t.mock.method(globalThis, 'setInterval')
+  const clearSpy = t.mock.method(globalThis, 'clearInterval')
+  const { route, dispose } = harness()
+  const first = await subscribe(route)
+  const second = await subscribe(route)
+
+  dispose()
+
+  assert.equal(first.res.writableEnded, true, 'a held-open response must be released on unload')
+  assert.equal(second.res.writableEnded, true)
+  assert.equal(clearSpy.mock.callCount(), 1, 'the timer is cleared')
+  assert.equal(setSpy.mock.callCount(), 1, 'and not restarted')
+
+  // A write after dispose must still succeed: the channel is simply empty.
+  const late = await endpoint(route, 'setEnabled', { id: 'mcp-github', enabled: false })
+  assert.equal(late.json.ok, true)
+})
+
+test('a broadcast never throws into a write path', async () => {
+  const { route } = harness()
+  const stream = await subscribe(route)
+  stream.res.failWrites = true
+
+  const reply = await endpoint(route, 'add', {
+    id: 'mcp-dead-socket',
+    config: { serverName: 'deadsocket', transport: 'streamable-http', url: 'https://dead.example/mcp' },
+  })
+  assert.equal(reply.json.ok, true, 'the write path survives a dead subscriber')
+
+  const kept = await subscribe(route)
+  stream.res.failWrites = false
+  await endpoint(route, 'setEnabled', { id: 'mcp-github', enabled: false })
+  assert.equal(stream.res.written().includes('"type":"changed"'), false, 'the dead stream was dropped')
+  assert.match(kept.res.written(), /"type":"changed"/)
+  kept.res.clientClose()
+})
+
+test('the events path sits behind the same fence and only GET opens it', async () => {
+  const denied = await call(harness({ reject: () => 401 }).route, { url: '/mcp-manager/events', method: 'GET' })
+  assert.equal(denied.status, 401)
+  assert.equal(denied.body, 'unauthorized')
+  assert.equal(denied.res.written(), '', 'a fenced request opens no stream')
+
+  const { route } = harness()
+  for (const options of [
+    { url: '/mcp-manager/event', method: 'GET' },
+    { url: '/mcp-manager/events/extra', method: 'GET' },
+    { url: '/mcp-manager/', method: 'GET' },
+    { url: '/other/events', method: 'GET' },
+    { url: '/mcp-manager/events', method: 'HEAD' },
+    { url: '/mcp-manager/events', method: 'PUT' },
+  ]) {
+    const reply = await call(route, options)
+    assert.equal(reply.status, 404, `${options.method} ${options.url}`)
+    assert.equal(reply.res.written(), '', `${options.method} ${options.url} must not open a stream`)
+  }
+
+  // POST to the events path stays what it always was: a well-formed segment
+  // that no endpoint answers.
+  const post = await call(route, { url: '/mcp-manager/events', method: 'POST', body: { payload: null } })
+  assert.equal(post.status, 200)
+  assert.equal(post.json.error.code, 'unknown-endpoint')
+})
+
 test('list reports both bridge packages with their status projection', async () => {
   const { route } = harness()
   const reply = await endpoint(route, 'list', null)
@@ -283,24 +505,9 @@ test('add writes an official-client insert row and rejects duplicates', async ()
     url: 'https://example.com/mcp',
   }
   const added = await endpoint(route, 'add', { id: 'mcp-new', config })
-  assert.equal(added.json.ok, true)
-  assert.equal(added.json.value.added, 'mcp-new')
-
-  const created = added.json.value.row
-  assert.equal(created.id, 'mcp-new')
-  assert.equal(created.serverName, 'newserver')
-  assert.equal(created.transport, 'streamable-http')
-  assert.equal(created.url, 'https://example.com/mcp')
-  assert.equal(created.ownerPackage, '@deepseek-ai/dsh-mcp-client')
-  assert.equal(created.enabled, true)
-  assert.equal(created.fiberPhase, null)
-  assert.equal(created.toolCount, 0)
-  assert.equal(created.userManaged, true)
-
-  // The reply is the row a `list` would report, so the panel can render it
-  // without a second read.
-  const listed = listOf(await endpoint(route, 'list', null)).find((server) => server.id === 'mcp-new')
-  assert.deepEqual(created, listed)
+  // The reply is the id only: the panel re-reads the list (the change channel
+  // nudges it), so the created row does not need to travel in the reply.
+  assert.deepEqual(added.json, { ok: true, value: { added: 'mcp-new' } })
 
   const rows = readPatchList(patchFile)
   const inserted = rows.at(-1).insert[0]
