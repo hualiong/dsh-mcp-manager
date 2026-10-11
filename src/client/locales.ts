@@ -35,18 +35,14 @@ export type McpManagerKeys =
   | 'statusActiveNoTools'
   | 'statusFailed'
   | 'statusDisabled'
-  | 'statusLoading'
-  | 'statusPending'
-  | 'statusUnloading'
   | 'statusNotLoaded'
-  | 'connecting'
+  | 'statusPending'
+  | 'statusLoading'
+  | 'statusUnloading'
   | 'toolCount'
-  | 'probeOk'
-  | 'probeFail'
-  | 'probeSkipped'
   | 'enable'
   | 'disable'
-  | 'test'
+  | 'switchBridgeMissing'
   | 'remove'
   | 'formAddTitle'
   | 'formEditTitle'
@@ -59,16 +55,21 @@ export type McpManagerKeys =
   | 'fieldEnv'
   | 'fieldCwd'
   | 'fieldHeaders'
+  | 'headerName'
+  | 'headerValue'
+  | 'addHeader'
   | 'fieldTimeout'
-  | 'fieldFailStartup'
-  | 'fieldCredentialRef'
-  | 'fieldCallbackPort'
+  | 'noticeOAuth'
+  | 'noticeOAuthMissing'
+  | 'noticePlain'
+  | 'noticeUnknownAdd'
+  | 'noticeUnknownEdit'
   | 'cancel'
   | 'save'
   | 'errDuplicateId'
   | 'errDuplicateName'
   | 'errInvalidConfig'
-  | 'errNotFound'
+  | 'errBridgeMissing'
   | 'errTransport'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -101,22 +102,18 @@ export const zh: McpManagerDict = {
   statusActiveNoTools: '无工具',
   statusFailed: '失败',
   statusDisabled: '已停用',
-  statusLoading: '加载中',
-  statusPending: '等待中',
-  statusUnloading: '卸载中',
   statusNotLoaded: '未加载',
-  connecting: '连接中',
+  statusPending: '等待中',
+  statusLoading: '加载中',
+  statusUnloading: '卸载中',
   toolCount: '{count} 个工具',
-  probeOk: '已连接，耗时 {ms}ms · {count} 个工具',
-  probeFail: '{error}（{ms}ms）',
-  probeSkipped: '未检测',
   enable: '启用',
   disable: '停用',
-  test: '测试',
+  switchBridgeMissing: '需要先安装 @hualiong/dsh-oauth-mcp-client 才能启用',
   remove: '删除',
   formAddTitle: '添加 MCP 服务器',
   formEditTitle: '编辑 {name}',
-  fieldId: '条目 ID',
+  fieldId: '插件 ID',
   fieldServerName: 'serverName',
   fieldTransport: '传输方式',
   fieldUrl: 'URL',
@@ -124,17 +121,22 @@ export const zh: McpManagerDict = {
   fieldArgs: '参数（每行一个）',
   fieldEnv: '环境变量（KEY=VALUE，每行一个）',
   fieldCwd: '工作目录（可选）',
-  fieldHeaders: '请求头（Key: Value，每行一个）',
+  fieldHeaders: '请求头（若携带 Authorization 头，则由内置 MCP 客户端处理连接）',
+  headerName: '请求头名称',
+  headerValue: '请求头值',
+  addHeader: '添加请求头',
   fieldTimeout: '超时（毫秒，可选）',
-  fieldFailStartup: '启动失败即报错',
-  fieldCredentialRef: '凭据引用（OAuth）',
-  fieldCallbackPort: '回调端口（OAuth）',
+  noticeOAuth: '该地址要求 OAuth 授权，已交给 OAuth 桥接管',
+  noticeOAuthMissing: '该行需要 OAuth 桥，但当前 profile 未安装 @hualiong/dsh-oauth-mcp-client；已先以「停用」状态保存，装好并重启 DSH 后直接打开开关即可',
+  noticePlain: '未检测到 OAuth 要求，已交给内置客户端处理',
+  noticeUnknownAdd: '暂时无法验证该地址，已按普通 Streamable HTTP 接入；若之后连接失败，等服务器可达后重新保存一次即可',
+  noticeUnknownEdit: '暂时无法验证该地址，已保持原有接入方式不变',
   cancel: '取消',
   save: '保存',
-  errDuplicateId: '条目 ID 已被使用',
+  errDuplicateId: '插件 ID 已被使用',
   errDuplicateName: 'serverName 已被其他服务器使用',
   errInvalidConfig: 'MCP 服务器配置无效',
-  errNotFound: '未找到该 MCP 服务器条目',
+  errBridgeMissing: '该行所属的 MCP 桥未安装，无法启用；请先安装 @hualiong/dsh-oauth-mcp-client',
   errTransport: '无法访问主进程',
 }
 
@@ -159,18 +161,14 @@ export const en: McpManagerDict = {
   statusActiveNoTools: 'No tools',
   statusFailed: 'Failed',
   statusDisabled: 'Disabled',
-  statusLoading: 'Loading',
-  statusPending: 'Pending',
-  statusUnloading: 'Unloading',
   statusNotLoaded: 'Not loaded',
-  connecting: 'Connecting',
+  statusPending: 'Pending',
+  statusLoading: 'Loading',
+  statusUnloading: 'Unloading',
   toolCount: '{count} tools',
-  probeOk: 'Connected in {ms}ms · {count} tools',
-  probeFail: '{error} ({ms}ms)',
-  probeSkipped: 'Not probed',
   enable: 'Enable',
   disable: 'Disable',
-  test: 'Test',
+  switchBridgeMissing: 'Install @hualiong/dsh-oauth-mcp-client before this row can be enabled',
   remove: 'Remove',
   formAddTitle: 'Add MCP server',
   formEditTitle: 'Edit {name}',
@@ -182,16 +180,21 @@ export const en: McpManagerDict = {
   fieldArgs: 'Args (one per line)',
   fieldEnv: 'Env (KEY=VALUE, one per line)',
   fieldCwd: 'Working directory (optional)',
-  fieldHeaders: 'Headers (Key: Value, one per line)',
+  fieldHeaders: 'Headers (a row carrying an Authorization header is connected by the built-in MCP client)',
+  headerName: 'Header name',
+  headerValue: 'Header value',
+  addHeader: 'Add header',
   fieldTimeout: 'Timeout (ms, optional)',
-  fieldFailStartup: 'Fail on startup error',
-  fieldCredentialRef: 'Credential reference (OAuth)',
-  fieldCallbackPort: 'Callback port (OAuth)',
+  noticeOAuth: 'This address requires OAuth authorization; the OAuth bridge now handles it',
+  noticeOAuthMissing: 'This row needs the OAuth bridge, but @hualiong/dsh-oauth-mcp-client is not installed in this profile; it was saved disabled — install the bridge, restart DSH, then switch this row on',
+  noticePlain: 'No OAuth requirement found; the built-in client now handles it',
+  noticeUnknownAdd: 'This address could not be verified yet, so it was added as a plain Streamable HTTP server. If it fails to connect, save it again once the server is reachable.',
+  noticeUnknownEdit: 'This address could not be verified yet; its existing connection type is unchanged',
   cancel: 'Cancel',
   save: 'Save',
   errDuplicateId: 'Entry id is already in use',
   errDuplicateName: 'serverName is already used by another server',
   errInvalidConfig: 'Invalid MCP server configuration',
-  errNotFound: 'MCP server entry not found',
+  errBridgeMissing: 'The MCP bridge this row needs is not installed, so the row cannot be enabled; install @hualiong/dsh-oauth-mcp-client first',
   errTransport: 'Cannot reach the host',
 }

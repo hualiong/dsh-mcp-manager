@@ -48,7 +48,6 @@ async function buildHost() {
     target: 'node20',
     external: [
       'js-yaml',
-      '@modelcontextprotocol/*',
       '@deepseek-ai/*',
     ],
     sourcemap: true,

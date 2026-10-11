@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP 管理器",
+    "description": "在 Web 界面里查看、添加、启停并监控本配置的 MCP 服务器。"
+  }
+}

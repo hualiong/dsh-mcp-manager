@@ -9,19 +9,18 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
-import { fileURLToPath } from 'node:url'
-import { apply } from '../src/index.ts'
+import { apply, createChangeChannel, handleRequest } from '../src/index.ts'
 import { readPatchList } from '../src/patch.ts'
-
-const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp-test-server.mjs')
+import { MCP_CLIENT_PACKAGE, MCP_OAUTH_CLIENT_PACKAGE } from '../src/shared.ts'
+import { validateMcpConfig } from '../src/validate.ts'
 
 const PATCH_SEED = `- insert:
     - id: oauth-mcp-cloudflare
-      name: '@dsh-external/dsh-oauth-mcp-client'
+      name: '@hualiong/dsh-oauth-mcp-client'
       config:
         serverName: cloudflare
         url: https://mcp.cloudflare.com/mcp
@@ -37,13 +36,13 @@ const PATCH_SEED = `- insert:
     url: https://api.githubcopilot.com/mcp
 `
 
-/** Loader entries: the user's OAuth row, a native row, a bundle-only OAuth row, and a stdio fixture. */
+/** Loader entries: the user's OAuth row, a native row, a bundle-only OAuth row, and a stdio row. */
 const ENTRIES = [
   {
     id: 'include:oauth-mcp-cloudflare',
     disabled: false,
     options: {
-      name: '@dsh-external/dsh-oauth-mcp-client',
+      name: '@hualiong/dsh-oauth-mcp-client',
       config: {
         serverName: 'cloudflare',
         url: 'https://mcp.cloudflare.com/mcp',
@@ -73,17 +72,17 @@ const ENTRIES = [
     id: 'oauth-mcp-bundle',
     disabled: false,
     options: {
-      name: '@dsh-external/dsh-oauth-mcp-client',
+      name: '@hualiong/dsh-oauth-mcp-client',
       config: { serverName: 'bundle', url: 'https://mcp.example.com/mcp' },
     },
     fiber: { state: 3 },
   },
   {
-    id: 'mcp-fixture',
+    id: 'mcp-stdio-local',
     disabled: false,
     options: {
       name: '@deepseek-ai/dsh-mcp-client',
-      config: { serverName: 'fixture', transport: 'stdio', command: process.execPath, args: [FIXTURE] },
+      config: { serverName: 'localfs', transport: 'stdio', command: 'npx', args: ['-y', 'some-mcp'] },
     },
     fiber: { state: 2 },
   },
@@ -97,16 +96,35 @@ const TOOL_SCHEMAS = [
   { name: 'other' },
 ]
 
-/** Mount the host half over fake sibling services and return the mounted route. */
-function harness({ reject = () => undefined, entries = ENTRIES, tools = TOOL_SCHEMAS } = {}) {
+/**
+ * Mount the host half over fake sibling services and return the mounted route.
+ *
+ * `apply()` always probes over the real network, so the request path is driven
+ * through `handleRequest` with a stub probe instead; `apply()` still runs here
+ * so its own mounting is exercised, and the fiber disposers stay real.
+ */
+function harness({
+  reject = () => undefined,
+  entries = ENTRIES,
+  tools = TOOL_SCHEMAS,
+  probe = async () => 'plain',
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'mcp-manager-route-'))
   const patchFile = join(dir, 'cordis.patch.yml')
   writeFileSync(patchFile, PATCH_SEED)
 
   const routes = []
   const disposers = []
+  const warnings = []
+  // Cordis' logger is both callable (`ctx.logger('scope')`) and a logger.
+  const childLogger = {
+    info() {},
+    warn: (...args) => warnings.push(args.join(' ')),
+    error() {},
+    debug() {},
+  }
   const ctx = {
-    logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    logger: Object.assign(() => childLogger, childLogger),
     loader: { entries: () => entries },
     tools: { schemas: () => tools },
     connection: { requestRejection: (req) => reject(req) },
@@ -122,9 +140,29 @@ function harness({ reject = () => undefined, entries = ENTRIES, tools = TOOL_SCH
   }
   apply(ctx, { patchFile })
   assert.equal(routes.length, 1, 'apply() must mount exactly one route')
+
+  const channel = createChangeChannel(ctx, patchFile)
+  const route = {
+    ...routes[0],
+    handler: (req, res) => handleRequest(ctx, patchFile, channel, req, res, probe),
+  }
   // Dispose the plugin fiber exactly as the loader would on unload.
-  const dispose = () => { for (const disposer of disposers) disposer() }
-  return { route: routes[0], patchFile, dispose }
+  const dispose = () => {
+    channel.close()
+    for (const disposer of disposers) disposer()
+  }
+  return { route, patchFile, dispose, warnings }
+}
+
+/** Fake the OAuth bridge being installed in a profile directory. */
+function installOAuthBridge(patchFile) {
+  const packageDir = join(dirname(patchFile), 'node_modules', ...MCP_OAUTH_CLIENT_PACKAGE.split('/'))
+  mkdirSync(packageDir, { recursive: true })
+  writeFileSync(
+    join(packageDir, 'package.json'),
+    JSON.stringify({ name: MCP_OAUTH_CLIENT_PACKAGE, version: '0.0.0', main: 'index.js' }),
+  )
+  writeFileSync(join(packageDir, 'index.js'), '')
 }
 
 /**
@@ -463,11 +501,11 @@ test('list reports both bridge packages with their status projection', async () 
 
   const servers = reply.json.value.servers
   const names = servers.map((server) => server.serverName)
-  assert.deepEqual(names.sort(), ['bundle', 'cloudflare', 'fixture', 'github'])
+  assert.deepEqual(names.sort(), ['bundle', 'cloudflare', 'github', 'localfs'])
 
   const cloudflare = servers.find((server) => server.serverName === 'cloudflare')
   assert.equal(cloudflare.id, 'oauth-mcp-cloudflare')
-  assert.equal(cloudflare.ownerPackage, '@dsh-external/dsh-oauth-mcp-client')
+  assert.equal(cloudflare.ownerPackage, '@hualiong/dsh-oauth-mcp-client')
   assert.equal(cloudflare.transport, 'streamable-http')
   assert.equal(cloudflare.url, 'https://mcp.cloudflare.com/mcp')
   assert.equal(cloudflare.credentialRef, 'CLOUDFLARE_MCP_OAUTH')
@@ -486,7 +524,7 @@ test('list reports both bridge packages with their status projection', async () 
   assert.deepEqual(github.reconnect, { enabled: true, maxAttempts: 20 })
 
   const bundleOnly = servers.find((server) => server.serverName === 'bundle')
-  assert.equal(bundleOnly.ownerPackage, '@dsh-external/dsh-oauth-mcp-client')
+  assert.equal(bundleOnly.ownerPackage, '@hualiong/dsh-oauth-mcp-client')
   assert.equal(bundleOnly.userManaged, false)
   assert.equal(bundleOnly.fiberPhase, 'failed')
 })
@@ -497,22 +535,49 @@ test('patchInfo reports the edited file', async () => {
   assert.deepEqual(reply.json.value.patch, { path: patchFile, exists: true })
 })
 
-test('add writes an official-client insert row and rejects duplicates', async () => {
-  const { route, patchFile } = harness()
+test('add picks the bridge package by transport, own token and probe', async () => {
+  let probes = 0
+  const { route, patchFile } = harness({ probe: async () => { probes += 1; return 'plain' } })
   const config = {
     serverName: 'newserver',
     transport: 'streamable-http',
     url: 'https://example.com/mcp',
   }
   const added = await endpoint(route, 'add', { id: 'mcp-new', config })
-  // The reply is the id only: the panel re-reads the list (the change channel
-  // nudges it), so the created row does not need to travel in the reply.
-  assert.deepEqual(added.json, { ok: true, value: { added: 'mcp-new' } })
+  // The reply carries the id and the probe verdict: the panel re-reads the list
+  // (the change channel nudges it), so the created row travels through neither.
+  assert.deepEqual(added.json, { ok: true, value: { added: 'mcp-new', probe: 'plain' } })
+  assert.equal(probes, 1, 'a plain HTTP row is decided by exactly one probe')
 
-  const rows = readPatchList(patchFile)
-  const inserted = rows.at(-1).insert[0]
-  assert.equal(inserted.name, '@deepseek-ai/dsh-mcp-client')
+  // A plain endpoint stays on the built-in client, which keeps `transport`.
+  const inserted = readPatchList(patchFile).at(-1).insert[0]
+  assert.equal(inserted.name, MCP_CLIENT_PACKAGE)
   assert.deepEqual(inserted.config, config)
+
+  // A row carrying its own token is settled before the probe: the OAuth bridge
+  // would overwrite that Authorization header with its own token.
+  const ownToken = {
+    serverName: 'pat',
+    transport: 'streamable-http',
+    url: 'https://pat.example/mcp',
+    headers: { Authorization: 'Bearer ghp_x' },
+  }
+  const ownTokenAdd = await endpoint(route, 'add', { id: 'mcp-pat', config: ownToken })
+  assert.deepEqual(ownTokenAdd.json.value, { added: 'mcp-pat', probe: 'plain' })
+  const pat = readPatchList(patchFile).at(-1).insert[0]
+  assert.equal(pat.name, MCP_CLIENT_PACKAGE)
+  assert.deepEqual(pat.config, ownToken)
+
+  // stdio can only be the built-in client, and needs no probe either.
+  const stdioAdd = await endpoint(route, 'add', {
+    id: 'mcp-new-stdio',
+    config: { serverName: 'newstdio', transport: 'stdio', command: 'npx' },
+  })
+  assert.deepEqual(stdioAdd.json.value, { added: 'mcp-new-stdio', probe: 'plain' })
+  const stdio = readPatchList(patchFile).at(-1).insert[0]
+  assert.equal(stdio.name, MCP_CLIENT_PACKAGE)
+  assert.equal(stdio.config.transport, 'stdio')
+  assert.equal(probes, 1, 'stdio and self-authenticating rows must not be probed')
 
   // The loader is the source of truth for a taken id (a disabled row is still
   // a live entry, so it is covered).
@@ -540,6 +605,198 @@ test('add writes an official-client insert row and rejects duplicates', async ()
   }
 })
 
+test('the probe sends a 401+Bearer endpoint to the OAuth bridge', async () => {
+  const { route, patchFile } = harness({ probe: async () => 'oauth' })
+  installOAuthBridge(patchFile)
+  const added = await endpoint(route, 'add', {
+    id: 'mcp-oauth-new',
+    config: {
+      serverName: 'oauthnew',
+      transport: 'streamable-http',
+      url: 'https://oauthnew.example/mcp',
+      credentialRef: 'OAUTHNEW_REF',
+      callbackPort: 45872,
+    },
+  })
+  assert.deepEqual(added.json, { ok: true, value: { added: 'mcp-oauth-new', probe: 'oauth' } })
+
+  const inserted = readPatchList(patchFile).at(-1).insert[0]
+  assert.equal(inserted.name, MCP_OAUTH_CLIENT_PACKAGE)
+  // That bridge has no transport field, so the panel's value never reaches the file.
+  assert.deepEqual(inserted.config, {
+    serverName: 'oauthnew',
+    url: 'https://oauthnew.example/mcp',
+    credentialRef: 'OAUTHNEW_REF',
+    callbackPort: 45872,
+  })
+
+  // The new row lands in the list as an OAuth-owned row right away.
+  const row = listOf(await endpoint(route, 'list', null)).find((server) => server.id === 'mcp-oauth-new')
+  assert.equal(row.ownerPackage, MCP_OAUTH_CLIENT_PACKAGE)
+  assert.equal(row.transport, 'streamable-http')
+  assert.equal(row.credentialRef, 'OAUTHNEW_REF')
+
+  // The OAuth bridge's own rules apply: a public http:// URL is rejected.
+  const rejected = await endpoint(route, 'add', {
+    id: 'mcp-oauth-bad',
+    config: {
+      serverName: 'oauthbad',
+      transport: 'streamable-http',
+      url: 'http://public.example/mcp',
+    },
+  })
+  assert.equal(rejected.json.error.code, 'invalid-config')
+  assert.equal(typeof rejected.json.error.details.fields.url, 'string')
+})
+
+test('an undecided probe defaults to the built-in client, an edit keeps the owner', async () => {
+  const added = await endpoint(harness({ probe: async () => 'unreachable' }).route, 'add', {
+    id: 'mcp-offline',
+    config: { serverName: 'offline', transport: 'streamable-http', url: 'https://offline.example/mcp' },
+  })
+  assert.deepEqual(added.json.value, { added: 'mcp-offline', probe: 'unreachable' })
+
+  // The live OAuth row keeps its bridge when the endpoint cannot be reached:
+  // an offline probe must not silently strip its credential reference.
+  const keepRun = harness({ probe: async () => 'unreachable' })
+  installOAuthBridge(keepRun.patchFile)
+  const kept = await endpoint(keepRun.route, 'update', {
+    id: 'oauth-mcp-cloudflare',
+    config: {
+      serverName: 'cloudflare',
+      transport: 'streamable-http',
+      url: 'https://mcp.cloudflare.com/mcp/v2',
+    },
+  })
+  assert.deepEqual(kept.json.value, { updated: 'oauth-mcp-cloudflare', probe: 'unreachable' })
+  const keptRow = readPatchList(keepRun.patchFile).flatMap((row) => row.insert ?? [])[0]
+  assert.equal(keptRow.name, MCP_OAUTH_CLIENT_PACKAGE)
+  assert.equal(keptRow.config.credentialRef, 'CLOUDFLARE_MCP_OAUTH')
+
+  // A live built-in row moves to the OAuth bridge when the probe demands it.
+  const moveRun = harness({ probe: async () => 'oauth' })
+  installOAuthBridge(moveRun.patchFile)
+  const moved = await endpoint(moveRun.route, 'update', {
+    id: 'mcp-github',
+    config: { serverName: 'github', transport: 'streamable-http', url: 'https://github.example/mcp' },
+  })
+  assert.deepEqual(moved.json.value, { updated: 'mcp-github', probe: 'oauth' })
+  const movedRow = readPatchList(moveRun.patchFile).find((row) => row.id === 'mcp-github')
+  assert.equal(movedRow.name, MCP_OAUTH_CLIENT_PACKAGE)
+  assert.equal(movedRow.config.transport, undefined, 'the OAuth schema has no transport field')
+  assert.equal(movedRow.disabled, true, 'an edit must not re-enable a row the user had switched off')
+})
+
+test('a row sent to an OAuth bridge the profile lacks is flagged, saved disabled', async () => {
+  // No package in the temp profile: the row is written disabled, the panel is warned.
+  const gapRun = harness({ probe: async () => 'oauth' })
+  const gapAdded = await endpoint(gapRun.route, 'add', {
+    id: 'mcp-oauth-gap',
+    config: { serverName: 'gap', transport: 'streamable-http', url: 'https://gap.example/mcp' },
+  })
+  assert.deepEqual(gapAdded.json.value, {
+    added: 'mcp-oauth-gap',
+    probe: 'oauth',
+    oauthBridgeMissing: true,
+  })
+  const gapRow = readPatchList(gapRun.patchFile).at(-1).insert[0]
+  assert.equal(gapRow.name, MCP_OAUTH_CLIENT_PACKAGE, 'the row is saved anyway: install the bridge later')
+  assert.equal(gapRow.disabled, true, 'it cannot load, so it is saved switched off')
+  // The host log names the package and what to do about it.
+  assert.equal(gapRun.warnings.filter((warning) => warning.includes(MCP_OAUTH_CLIENT_PACKAGE)).length, 1)
+
+  // The same profile with the bridge installed reports nothing extra.
+  const okRun = harness({ probe: async () => 'oauth' })
+  installOAuthBridge(okRun.patchFile)
+  const okAdded = await endpoint(okRun.route, 'add', {
+    id: 'mcp-oauth-ok',
+    config: { serverName: 'ok', transport: 'streamable-http', url: 'https://ok.example/mcp' },
+  })
+  assert.deepEqual(okAdded.json.value, { added: 'mcp-oauth-ok', probe: 'oauth' })
+  assert.equal(readPatchList(okRun.patchFile).at(-1).insert[0].disabled, undefined)
+  assert.deepEqual(okRun.warnings, [])
+
+  // A built-in row never consults the bridge at all.
+  const builtInRun = harness()
+  const builtIn = await endpoint(builtInRun.route, 'add', {
+    id: 'mcp-plain',
+    config: { serverName: 'plain', transport: 'stdio', command: 'npx' },
+  })
+  assert.deepEqual(builtIn.json.value, { added: 'mcp-plain', probe: 'plain' })
+  assert.deepEqual(builtInRun.warnings, [])
+
+  // An edit that keeps an OAuth owner is flagged and disabled the same way.
+  const keepRun = harness({ probe: async () => 'unreachable' })
+  const kept = await endpoint(keepRun.route, 'update', {
+    id: 'oauth-mcp-cloudflare',
+    config: { serverName: 'cloudflare', transport: 'streamable-http', url: 'https://mcp.cloudflare.com/mcp/v2' },
+  })
+  assert.equal(kept.json.value.probe, 'unreachable')
+  assert.equal(kept.json.value.oauthBridgeMissing, true)
+  assert.equal(readPatchList(keepRun.patchFile).flatMap((row) => row.insert ?? [])[0].disabled, true)
+})
+
+test('the switch cannot be turned on while the bridge is missing, and works once it is installed', async () => {
+  // The seeded OAuth row is saved enabled; there is no bridge in the profile.
+  const gapRun = harness()
+  const before = listOf(await endpoint(gapRun.route, 'list', null))
+    .find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.equal(before.bridgeMissing, true)
+  assert.equal(before.ownerPackage, MCP_OAUTH_CLIENT_PACKAGE)
+
+  // Every other row is not flagged: the field is present only when true.
+  const other = listOf(await endpoint(gapRun.route, 'list', null))
+    .find((server) => server.id === 'mcp-github')
+  assert.equal('bridgeMissing' in other, false)
+
+  const refused = await endpoint(gapRun.route, 'setEnabled', { id: 'oauth-mcp-cloudflare', enabled: true })
+  assert.equal(refused.json.ok, false)
+  assert.equal(refused.json.error.code, 'bridge-missing')
+  assert.match(refused.json.error.message, /@hualiong\/dsh-oauth-mcp-client/)
+  assert.equal(
+    readPatchList(gapRun.patchFile).flatMap((row) => row.insert ?? [])[0].disabled,
+    undefined,
+    'a refused enable must not touch the file',
+  )
+
+  // Switching off is always allowed.
+  const disabled = await endpoint(gapRun.route, 'setEnabled', { id: 'oauth-mcp-cloudflare', enabled: false })
+  assert.deepEqual(disabled.json, { ok: true, value: { id: 'oauth-mcp-cloudflare', enabled: false } })
+  assert.equal(readPatchList(gapRun.patchFile).flatMap((row) => row.insert ?? [])[0].disabled, true)
+
+  // Install the bridge: the same row switches on without being saved again.
+  installOAuthBridge(gapRun.patchFile)
+  const after = listOf(await endpoint(gapRun.route, 'list', null))
+    .find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.equal('bridgeMissing' in after, false)
+
+  const enabled = await endpoint(gapRun.route, 'setEnabled', { id: 'oauth-mcp-cloudflare', enabled: true })
+  assert.deepEqual(enabled.json, { ok: true, value: { id: 'oauth-mcp-cloudflare', enabled: true } })
+  assert.equal(readPatchList(gapRun.patchFile).flatMap((row) => row.insert ?? [])[0].disabled, false)
+})
+
+test('an official row rejects an unknown transport, and the OAuth branch rejects stdio', async () => {
+  const { route, patchFile } = harness()
+  // `update` keys the schema off the owner the probe picked, so the built-in
+  // row cannot be handed a transport its own schema does not know.
+  const reply = await endpoint(route, 'update', {
+    id: 'mcp-github',
+    config: { serverName: 'github', transport: 'sse', url: 'https://github.example/mcp' },
+  })
+  assert.equal(reply.json.error.code, 'invalid-config')
+  assert.equal(typeof reply.json.error.details.fields.transport, 'string')
+  assert.equal(readPatchList(patchFile).find((row) => row.id === 'mcp-github').config.transport, 'streamable-http')
+
+  // The ownership rule never hands an OAuth row a stdio config, so this guard is
+  // the last line of defence and is checked directly.
+  const stdioOnOauth = validateMcpConfig(
+    'x',
+    { serverName: 'x', transport: 'stdio', command: 'npx' },
+    MCP_OAUTH_CLIENT_PACKAGE,
+  )
+  assert.equal(typeof stdioOnOauth.transport, 'string')
+})
+
 test('remove deletes the row from the user patch', async () => {
   const { route, patchFile } = harness()
   const reply = await endpoint(route, 'remove', { id: 'oauth-mcp-cloudflare' })
@@ -556,13 +813,13 @@ test('setEnabled flips the flag in place and keeps the owner package on override
   assert.deepEqual(disabled.json, { ok: true, value: { id: 'oauth-mcp-cloudflare', enabled: false } })
   const insert = readPatchList(patchFile).flatMap((row) => row.insert ?? [])
   assert.equal(insert[0].disabled, true)
-  assert.equal(insert[0].name, '@dsh-external/dsh-oauth-mcp-client')
+  assert.equal(insert[0].name, '@hualiong/dsh-oauth-mcp-client')
 
   // A bundle-defined row is not in the patch: the override must repeat its package.
   const bundle = await endpoint(route, 'setEnabled', { id: 'oauth-mcp-bundle', enabled: false })
   assert.equal(bundle.json.ok, true)
   const override = readPatchList(patchFile).find((row) => row.id === 'oauth-mcp-bundle')
-  assert.equal(override.name, '@dsh-external/dsh-oauth-mcp-client')
+  assert.equal(override.name, '@hualiong/dsh-oauth-mcp-client')
   assert.equal(override.disabled, true)
 
   const malformed = await endpoint(route, 'setEnabled', { id: 'oauth-mcp-bundle', enabled: 'yes' })
@@ -570,7 +827,8 @@ test('setEnabled flips the flag in place and keeps the owner package on override
 })
 
 test('update keeps the OAuth row intact and never writes a transport key into it', async () => {
-  const { route, patchFile } = harness()
+  const { route, patchFile } = harness({ probe: async () => 'oauth' })
+  installOAuthBridge(patchFile)
   const reply = await endpoint(route, 'update', {
     id: 'oauth-mcp-cloudflare',
     config: {
@@ -580,7 +838,7 @@ test('update keeps the OAuth row intact and never writes a transport key into it
       callbackPort: 45872,
     },
   })
-  assert.deepEqual(reply.json, { ok: true, value: { updated: 'oauth-mcp-cloudflare' } })
+  assert.deepEqual(reply.json, { ok: true, value: { updated: 'oauth-mcp-cloudflare', probe: 'oauth' } })
 
   const config = readPatchList(patchFile).flatMap((row) => row.insert ?? [])[0].config
   assert.equal(config.url, 'https://mcp.cloudflare.com/mcp/v2')
@@ -598,32 +856,6 @@ test('update keeps the OAuth row intact and never writes a transport key into it
 
   const malformed = await endpoint(route, 'update', { id: 'oauth-mcp-cloudflare' })
   assert.equal(malformed.json.error.code, 'bad-request')
-})
-
-test('probe skips an OAuth-owned row instead of reporting a false failure', async () => {
-  const { route } = harness()
-  const reply = await endpoint(route, 'probe', { id: 'oauth-mcp-cloudflare' })
-  assert.equal(reply.status, 200)
-  const result = reply.json.value
-  assert.equal(result.ok, false)
-  assert.equal(result.skipped, true)
-  assert.equal(result.latencyMs, 0)
-  assert.match(result.error, /OAuth/i)
-
-  const missing = await endpoint(route, 'probe', { id: 'nope' })
-  assert.equal(missing.json.error.code, 'not-found')
-
-  const malformed = await endpoint(route, 'probe', {})
-  assert.equal(malformed.json.error.code, 'bad-request')
-})
-
-test('probe still connects to a stdio server for real', async () => {
-  const { route } = harness()
-  const reply = await endpoint(route, 'probe', { id: 'mcp-fixture' })
-  const result = reply.json.value
-  assert.equal(result.ok, true, result.error)
-  assert.equal(result.toolCount, 1)
-  assert.ok(result.latencyMs >= 0)
 })
 
 test('list reports the file `enabled` while the fiber still disagrees', async () => {
@@ -645,7 +877,8 @@ test('list reports the file `enabled` while the fiber still disagrees', async ()
 })
 
 test('list reflects a just-saved edit without waiting for the loader', async () => {
-  const { route } = harness()
+  const { route, patchFile } = harness({ probe: async () => 'oauth' })
+  installOAuthBridge(patchFile)
   const before = await endpoint(route, 'list', null)
   const original = before.json.value.servers.find((server) => server.id === 'oauth-mcp-cloudflare')
   assert.equal(original.serverName, 'cloudflare')
@@ -682,7 +915,7 @@ test('list shows a freshly added server before the loader composes it', async ()
 
   const row = listOf(await endpoint(route, 'list', null)).find((server) => server.id === 'mcp-fresh')
   assert.equal(row.serverName, 'fresh')
-  assert.equal(row.ownerPackage, '@deepseek-ai/dsh-mcp-client')
+  assert.equal(row.ownerPackage, MCP_CLIENT_PACKAGE)
   assert.equal(row.fiberPhase, null)
   assert.equal(row.toolCount, 0)
   assert.equal(row.userManaged, true)

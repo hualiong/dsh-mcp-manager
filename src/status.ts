@@ -3,7 +3,7 @@
  *
  * Every MCP server is one MCP-bridge plugin entry in the loader composition
  * (`@deepseek-ai/dsh-mcp-client` or the OAuth bridge
- * `@dsh-external/dsh-oauth-mcp-client`). Its lifecycle phase (mirrored from the
+ * `@hualiong/dsh-oauth-mcp-client`). Its lifecycle phase (mirrored from the
  * Cordis FiberState const enum) plus the number of `mcp__<serverName>__*` tools
  * it currently has registered on the tool registry make up the observable
  * "connection status": a server that successfully connected and synchronized

@@ -10,12 +10,12 @@
     Run from a local clone (installs that clone via link:):
         powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
-    Or for the published npm package (also the `irm | iex` path):
-        powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Package @js2hou/dsh-mcp-manager@0.1.0
+    Or for a published npm package (also the `irm | iex` path):
+        powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Package @hualiong/dsh-mcp-manager@0.1.5
 
 .PARAMETER Package
-    npm spec to install (default: dsh-mcp-manager). Ignored when a local
-    checkout is detected (run from the repo) or -Path is given.
+    npm spec to install (default: @hualiong/dsh-mcp-manager). Ignored when a
+    local checkout is detected (run from the repo) or -Path is given.
 
 .PARAMETER Path
     Install from this local checkout instead of npm (link: spec).
@@ -30,7 +30,7 @@
     .\scripts\install.ps1 -Restart
 #>
 param(
-    [string]$Package = '@js2hou/dsh-mcp-manager',
+    [string]$Package = '@hualiong/dsh-mcp-manager',
     [string]$Path = '',
     [switch]$Restart,
     [switch]$DryRun
@@ -75,7 +75,7 @@ $isLocalRepo = $false
 if (Test-Path (Join-Path $repoRoot 'package.json')) {
     try {
         $manifest = Get-Content (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json
-        $isLocalRepo = $manifest.name -eq '@js2hou/dsh-mcp-manager'
+        $isLocalRepo = $manifest.name -eq '@hualiong/dsh-mcp-manager'
     } catch { $isLocalRepo = $false }
 }
 $spec = if ($isLocalRepo) { "link:$repoRoot" } else { $Package }

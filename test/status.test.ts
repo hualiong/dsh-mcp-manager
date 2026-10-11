@@ -183,7 +183,7 @@ const OAUTH_ROW = {
   ],
 }
 
-test('addMcpRow always writes an official-client insert row', () => {
+test('addMcpRow writes the insert row for the caller\'s bridge package', () => {
   const rows = addMcpRow([], 'mcp-new', {
     serverName: 'new',
     transport: 'streamable-http',
@@ -205,6 +205,24 @@ test('addMcpRow always writes an official-client insert row', () => {
     credentialRef: 'NOPE',
   })
   assert.equal(stray[0].insert[0].config.credentialRef, undefined)
+
+  // A plain streamable-http row is owned by the OAuth bridge: its two bridge
+  // keys are written and the selector's `transport` value is not, because that
+  // bridge's schema has no such field.
+  const oauth = addMcpRow([], 'mcp-oauth', {
+    serverName: 'oauth',
+    transport: 'streamable-http',
+    url: 'https://oauth.example/mcp',
+    credentialRef: 'OAUTH_REF',
+    callbackPort: 45_871,
+  }, MCP_OAUTH_CLIENT_PACKAGE)
+  assert.equal(oauth[0].insert[0].name, MCP_OAUTH_CLIENT_PACKAGE)
+  assert.deepEqual(oauth[0].insert[0].config, {
+    serverName: 'oauth',
+    url: 'https://oauth.example/mcp',
+    credentialRef: 'OAUTH_REF',
+    callbackPort: 45_871,
+  })
 })
 
 test('updateMcpConfig merges over an OAuth row instead of replacing it', () => {

@@ -10,13 +10,13 @@
 export const MCP_CLIENT_PACKAGE = '@deepseek-ai/dsh-mcp-client'
 
 /**
- * OAuth-enabled MCP server bridge. It ships its own config schema
- * (`serverName`, `url`, `credentialRef`, `scope`, `callbackPort`,
- * `authorizationTimeoutMs`, …) with no `transport` field, but it publishes its
- * tools under the same `mcp__<serverName>__*` namespace, so a row owned by it
- * is an MCP server row like any other.
+ * Streamable-HTTP MCP bridge that carries OAuth transparently (it always
+ * attaches an authorization provider, so only a `401` starts an authorization),
+ * which is why the panel has no OAuth switch. Its schema has no `transport`
+ * field, but it publishes tools under the same `mcp__<serverName>__*`
+ * namespace, so a row it owns is an MCP server row like any other.
  */
-export const MCP_OAUTH_CLIENT_PACKAGE = '@dsh-external/dsh-oauth-mcp-client'
+export const MCP_OAUTH_CLIENT_PACKAGE = '@hualiong/dsh-oauth-mcp-client'
 
 /** Every package the manager recognises as an MCP server bridge. */
 export const MCP_CLIENT_PACKAGES: readonly string[] = [
@@ -46,7 +46,16 @@ export const EVENT_CHANGED = 'changed'
 /** Frame sent once on connect, so a reconnect cannot miss a change it slept through. */
 export const EVENT_READY = 'ready'
 
-/** Supported MCP transports. */
+/**
+ * Supported MCP transports — the panel's whole transport vocabulary.
+ *
+ * Which bridge package implements a choice is the manager's business, not the
+ * user's: stdio can never need OAuth, so it stays with the built-in
+ * `@deepseek-ai/dsh-mcp-client`, while every streamable-http row goes to
+ * `MCP_OAUTH_CLIENT_PACKAGE`, which authorizes only when the server asks. A
+ * row owned by the OAuth bridge therefore reports `'streamable-http'` like any
+ * other HTTP row; `ownerPackage` is what tells them apart.
+ */
 export type McpTransport = 'stdio' | 'streamable-http'
 
 /** Fiber lifecycle phase mirror of the Cordis FiberState const enum. */
@@ -87,11 +96,18 @@ export interface McpServerConfig {
     maxDelayMs?: number
     maxAttempts?: number
   }
-  /** OAuth bridge only: credential reference holding the serialized OAuth state. */
+  /**
+   * OAuth bridge only: credential reference holding the serialized OAuth
+   * state. Never offered by the panel — the bridge derives it from the entry id
+   * — but preserved verbatim when an existing row states one.
+   */
   credentialRef?: string
   /** OAuth bridge only: fallback OAuth scope when server metadata declares none. */
   scope?: string
-  /** OAuth bridge only: loopback callback port (`0` = OS-assigned). */
+  /**
+   * OAuth bridge only: loopback callback port. Config-file only; the bridge's
+   * own default is a fixed port, not `0`.
+   */
   callbackPort?: number
   /** OAuth bridge only: maximum wait for the browser authorization callback. */
   authorizationTimeoutMs?: number
@@ -111,20 +127,25 @@ export interface McpServerInfo extends McpServerConfig {
   toolCount: number
   /** true when this server is defined in the user patch layer (removable). */
   userManaged: boolean
+  /**
+   * true when this row's bridge package cannot be resolved from the profile, so
+   * the row cannot load and must not be switched on. The panel disables the
+   * switch and the host rejects the toggle; installing the bridge and
+   * restarting DSH is all it takes to clear it — no re-save.
+   */
+  bridgeMissing?: boolean
 }
 
-/** Live connectivity probe result. */
-export interface McpProbeResult {
-  ok: boolean
-  latencyMs: number
-  toolCount?: number
-  error?: string
-  /**
-   * true when no verdict was produced at all — an OAuth-owned row a bare MCP
-   * probe cannot authorize. The UI shows a warning instead of a failure.
-   */
-  skipped?: true
-}
+/**
+ * How one HTTP endpoint was classified before its row was written.
+ *
+ * `'oauth'` — it answered `401` with a `Bearer` challenge, so only the OAuth
+ * bridge can connect. `'plain'` — it answered something else, or the row
+ * carries its own `Authorization` header, so the built-in client owns it.
+ * `'unreachable'` — the probe could not decide (offline, timeout, bad TLS), and
+ * the caller keeps whatever owner the row already had.
+ */
+export type McpOAuthProbe = 'oauth' | 'plain' | 'unreachable'
 
 /** RPC endpoints understood by the host channel handler. */
 export type McpEndpoint =
@@ -133,7 +154,6 @@ export type McpEndpoint =
   | 'remove'
   | 'setEnabled'
   | 'update'
-  | 'probe'
   | 'patchInfo'
 
 /** Server-side validation errors, keyed by field for inline form display. */

@@ -3,7 +3,7 @@
  *
  * MCP servers live as MCP-bridge plugin entries composed into the loader tree
  * (`@deepseek-ai/dsh-mcp-client`, or the OAuth bridge
- * `@dsh-external/dsh-oauth-mcp-client`). The user-editable layer is the profile
+ * `@hualiong/dsh-oauth-mcp-client`). The user-editable layer is the profile
  * patch file; the harness watches it (HMR) and hot-reloads the tree when it
  * changes, so every edit here is applied live without a restart.
  *
@@ -105,11 +105,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Project an edited config onto the owning package's schema.
  *
  * Every package other than the official client merges over the row's current
- * config first: the panel's editor does not model `credentialRef`, `scope`,
- * `callbackPort` or `authorizationTimeoutMs`, and a plain replace would strip
- * the authorization state reference the OAuth bridge needs. `transport` and the
- * stdio/http-only keys never reach such a row either, because its schema has no
- * such field and an unknown key is a load-time config error.
+ * config first: the panel models none of the OAuth-only keys, and a plain
+ * replace would strip the credential reference the OAuth bridge needs.
+ * `transport` and the stdio/http-only keys never reach such a row either,
+ * because its schema has no such field and an unknown key is a load-time config
+ * error.
  */
 function rowConfigFor(
   ownerPackage: string,
@@ -201,19 +201,30 @@ function rewriteLocated(
   )
 }
 
-/** The package an existing patch entry names, or the caller's fallback. */
-function ownerPackageOf(entry: Record<string, unknown>, fallback: string): string {
-  return typeof entry['name'] === 'string' ? entry['name'] : fallback
-}
-
 /**
  * Append a new MCP server as an id-less insert row (the only patch form that
  * creates brand-new entries in the composed tree).
+ *
+ * `ownerPackage` is the bridge the caller probed for: the built-in client for
+ * stdio, a self-authenticating row or a plain endpoint, the OAuth bridge when
+ * the endpoint answered a `401` + `Bearer` challenge. The config is projected
+ * onto that package's own key set, so the panel's `transport` selector value
+ * never lands in a row whose schema has no such field.
+ * @param rows - current patch rows.
+ * @param id - file-level entry id for the new server.
+ * @param config - the panel's draft config.
+ * @param ownerPackage - module specifier of the bridge package to create.
+ * @returns the rows with the new insert appended.
  */
-export function addMcpRow(rows: PatchRow[], id: string, config: McpServerConfig): PatchRow[] {
+export function addMcpRow(
+  rows: PatchRow[],
+  id: string,
+  config: McpServerConfig,
+  ownerPackage: string = MCP_CLIENT_PACKAGE,
+): PatchRow[] {
   return [
     ...rows,
-    { insert: [{ id, name: MCP_CLIENT_PACKAGE, config: rowConfigFor(MCP_CLIENT_PACKAGE, config) }] },
+    { insert: [{ id, name: ownerPackage, config: rowConfigFor(ownerPackage, config) }] },
   ]
 }
 
@@ -257,26 +268,30 @@ export function setMcpEnabled(
 }
 
 /**
- * Replace the config of an existing entry. When the entry is not in the user
- * patch (bundle-defined), a matching override row is appended.
+ * Replace the config of an existing entry, which may move the row to another
+ * bridge package. An edit no longer guarantees the same owner — the OAuth probe
+ * decides it again — so every rewritten entry (and a synthesized override row
+ * for a bundle-defined entry) names `ownerPackage`: a row whose `name` does not
+ * match its id makes the loader skip it.
  */
 export function updateMcpConfig(
   rows: PatchRow[],
   id: string,
   config: McpServerConfig,
-  fallbackPackage: string = MCP_CLIENT_PACKAGE,
+  ownerPackage: string = MCP_CLIENT_PACKAGE,
 ): PatchRow[] {
   const found = locate(rows, id)
   if (found === undefined) {
     return [
       ...rows,
-      { id, name: fallbackPackage, config: rowConfigFor(fallbackPackage, config) },
+      { id, name: ownerPackage, config: rowConfigFor(ownerPackage, config) },
     ]
   }
   const current = found.kind === 'row' ? found.row : found.item
   return rewriteLocated(rows, found, (entry) => ({
     ...entry,
-    config: rowConfigFor(ownerPackageOf(entry, fallbackPackage), config, current.config),
+    name: ownerPackage,
+    config: rowConfigFor(ownerPackage, config, current.config),
   }))
 }
 

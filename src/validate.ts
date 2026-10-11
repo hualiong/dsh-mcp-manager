@@ -10,40 +10,10 @@ import {
   MCP_OAUTH_CLIENT_PACKAGE,
   type McpFieldErrors,
   type McpServerConfig,
-  type McpTransport,
 } from './shared.ts'
 
 const SERVER_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/
 const ENTRY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
-
-/** Trim surrounding quotes from a pasted JSON-style key/value pair. */
-function stripQuotes(value: string): string {
-  const trimmed = value.trim()
-  if (trimmed.length >= 2) {
-    const first = trimmed[0]
-    const last = trimmed[trimmed.length - 1]
-    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-      return trimmed.slice(1, -1).trim()
-    }
-  }
-  return trimmed
-}
-
-/** Parse a key=value / `key: value` line block into a record. */
-export function parseKeyValueBlock(lines: string[] | undefined): Record<string, string> | undefined {
-  if (lines === undefined) return undefined
-  const out: Record<string, string> = {}
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed === '') continue
-    const eq = trimmed.indexOf('=')
-    const colon = trimmed.indexOf(':')
-    const sep = eq === -1 ? colon : colon === -1 ? eq : Math.min(eq, colon)
-    if (sep <= 0) continue
-    out[stripQuotes(trimmed.slice(0, sep))] = stripQuotes(trimmed.slice(sep + 1))
-  }
-  return out
-}
 
 /** Whether an OAuth bridge URL satisfies that plugin's own activation rules. */
 function isOAuthUrl(value: string): boolean {
@@ -59,7 +29,7 @@ function isOAuthUrl(value: string): boolean {
 }
 
 /** Whether a record carries an OAuth-owned Authorization header. */
-function hasAuthorizationHeader(headers: Record<string, string>): boolean {
+export function hasAuthorizationHeader(headers: Record<string, unknown>): boolean {
   return Object.keys(headers).some((key) => key.toLowerCase() === 'authorization')
 }
 
@@ -82,7 +52,11 @@ export function validateMcpConfig(
   }
 
   if (ownerPackage === MCP_OAUTH_CLIENT_PACKAGE) {
-    // The OAuth bridge has no transport field: it is always streamable-http.
+    // The OAuth bridge has no transport field: it is always streamable-http, so
+    // a stdio config cannot be expressed for it at all.
+    if (config.transport === 'stdio') {
+      errors['transport'] = 'stdio is not supported by the OAuth bridge'
+    }
     if (typeof config.url !== 'string' || !isOAuthUrl(config.url)) {
       errors['url'] = 'An https:// URL is required (http:// only for loopback)'
     }
@@ -105,8 +79,10 @@ export function validateMcpConfig(
       errors['headers'] = 'headers.Authorization is owned by OAuth and must not be set'
     }
   } else {
-    const transport: McpTransport = config.transport === 'stdio' ? 'stdio' : 'streamable-http'
-    if (transport === 'streamable-http') {
+    const transport = config.transport
+    if (transport !== 'stdio' && transport !== 'streamable-http') {
+      errors['transport'] = 'transport must be stdio or streamable-http'
+    } else if (transport === 'streamable-http') {
       if (typeof config.url !== 'string' || !/^https?:\/\/.+/.test(config.url)) {
         errors['url'] = 'A valid http(s):// URL is required for streamable-http'
       }

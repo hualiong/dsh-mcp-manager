@@ -14,23 +14,27 @@
  * constant names the official rule it reproduces, and deliberate departures
  * are called out where they happen.
  *
- * The card header carries the whole identity — name, transport chip, status
- * chip, OAuth chip, chevron — plus the enable Switch and the remove action, so
- * a collapsed card is still fully operable. Expanding a card IS editing it:
- * the disclosure panel mounts the edit form directly (there is no read-only
- * body left to show), and the form's footer holds [测试][取消][保存].
+ * The card header carries the whole identity — name, status chip, transport
+ * chip, chevron — plus the enable Switch, so a collapsed card is still fully
+ * operable. The transport chip is static: a transport is a written-down
+ * property of the row. The status chip is the only one that moves, and it
+ * walks the fiber's phases (等待中 → 加载中 → 工具数) so the connection story
+ * is visible while a server comes up. Expanding a card IS editing it: the
+ * disclosure panel mounts the edit form directly (there is no read-only body
+ * left to show), and the form's footer holds [取消][保存].
  *
  * The transcript-facing `DisclosureRow` primitive is deliberately NOT used:
  * its contract is a 24px tertiary process row, so it cannot carry the
  * settings-page title scale or host the row's controls.
  *
  * Controls come from the official kit
- * (`@deepseek-ai/dsh-client-ui-primitives`): Button (`md` = the page's 36px
- * actions, `sm` = the row's 28px actions), Input, Switch, Tag, StateDot,
- * SegmentedControl, Checkbox, Tooltip, RiskConfirmation, PathLabel and the
- * product icons. The only styles this module owns are inline declarations
- * carrying those official values — the kit ships no layout primitives and this
- * package has no CSS file.
+ * (`@deepseek-ai/dsh-client-ui-primitives`): Button (`sm` = the 28px actions
+ * this panel uses everywhere), Input, Switch, Tag, StateDot, Tooltip,
+ * SegmentedControl, RiskConfirmation, PathLabel and the product icons; the
+ * transport choice is the kit's SegmentedControl, the control the 模型 page's
+ * own add card switches its forms with. The only styles this module owns are
+ * inline declarations carrying those official values — the kit ships no layout
+ * primitives and this package has no CSS file.
  *
  * Copy is fully localized (zh/en); the renderer hands the registered `locale:`
  * namespace's `t` seat in as a prop, so the page follows the active GUI
@@ -38,12 +42,11 @@
  *
  * @module dsh-mcp-manager/client/McpManagerSection
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, ReactNode, RefObject } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   Button,
-  Checkbox,
   IconChevronDownOutlineRegular,
   IconPlusOutlineRegular,
   IconRefreshOutlineRegular,
@@ -56,14 +59,13 @@ import {
   Switch,
   Tag,
   Tooltip,
-  type SegmentedControlOption,
   type StateDotState,
   type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { EVENT_CHANNEL, MCP_OAUTH_CLIENT_PACKAGE } from '../shared.ts'
+import { EVENT_CHANNEL } from '../shared.ts'
 import type {
   McpFieldErrors,
-  McpProbeResult,
+  McpOAuthProbe,
   McpServerConfig,
   McpServerInfo,
   McpTransport,
@@ -84,17 +86,20 @@ interface SectionProps {
 
 /**
  * Status keys used by the card badge. A connected server reports the tool count
- * itself, so that case reuses the `toolCount` sentence.
+ * itself, so that case reuses the `toolCount` sentence; every other key names
+ * one fiber phase. The transport chip never takes part in any of them — a
+ * transport is a written-down property of the row, not a connection state — so
+ * the status chip is the only one that moves while a server comes up.
  */
 type StatusKey =
   | 'toolCount'
   | 'statusActiveNoTools'
   | 'statusFailed'
   | 'statusDisabled'
-  | 'statusLoading'
-  | 'statusPending'
-  | 'statusUnloading'
   | 'statusNotLoaded'
+  | 'statusPending'
+  | 'statusLoading'
+  | 'statusUnloading'
 
 /** Card status: the dot's semantic, the tag's palette, and the copy key. */
 interface ServerStatus {
@@ -104,21 +109,24 @@ interface ServerStatus {
   count?: string
 }
 
-/** Transport names as the header chip and the form's selector both read them. */
+/**
+ * Transport names as the header chip and the form's selector both read them.
+ * Both are short enough for the SegmentedControl's equal-width tracks, which is
+ * the only reason the selector can use it (the control places its indicator
+ * arithmetically; a label wider than its share would push the pill off).
+ */
 const TRANSPORT_LABELS: Record<McpTransport, string> = {
   stdio: 'STDIO',
   'streamable-http': 'Streamable HTTP',
 }
 
-/** Whether a row's connection has not been resolved yet. (Exported for the render harness.) */
-export function isConnecting(server: McpServerInfo): boolean {
-  if (!server.enabled) return false
-  return server.fiberPhase === null
-    || server.fiberPhase === 'pending'
-    || server.fiberPhase === 'loading'
-}
-
-const TRANSPORT_OPTIONS: readonly SegmentedControlOption<McpTransport>[] = [
+/**
+ * The transport choices, in display order — one list for the add and the edit
+ * form alike. Which bridge package implements a choice is the manager's
+ * business: streamable-http always goes to the OAuth bridge, which authorizes
+ * only when the server answers 401, so there is no third option to pick.
+ */
+const TRANSPORT_OPTIONS: readonly { value: McpTransport; label: string }[] = [
   { value: 'streamable-http', label: TRANSPORT_LABELS['streamable-http'] },
   { value: 'stdio', label: TRANSPORT_LABELS.stdio },
 ]
@@ -286,13 +294,25 @@ const chevronWrapStyle: CSSProperties = {
 const dotSlotStyle: CSSProperties = { flex: 'none', display: 'inline-flex' }
 /** inventory `.statusWithDot` (plus `.status,.failure`'s `margin:0`). */
 const statusLineStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 6, margin: 0 }
-/** inventory `.status` — the probe sentence. */
+/** inventory `.status` — the loading line's sentence. */
 const statusTextStyle: CSSProperties = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, lineHeight: '20px' }
-/** inventory `.failure` — the probe failure colour on the same 13/20 scale. */
-const failureStyle: CSSProperties = { ...statusTextStyle, color: 'var(--dsw-alias-state-error-primary)' }
 /** models `.error` — the page-level failure line. */
 const errorLineStyle: CSSProperties = {
   color: 'var(--dsw-alias-state-error-primary)',
+  margin: 0,
+  fontSize: 12,
+  lineHeight: '18px',
+}
+/** models `.savedNotice` — the page-level success line under the heading. */
+const noticeStyle: CSSProperties = {
+  color: 'var(--dsw-alias-state-success-primary)',
+  margin: 0,
+  fontSize: 12,
+  lineHeight: '18px',
+}
+/** models `.notice` — the same line for a result that needs attention. */
+const noticeWarnStyle: CSSProperties = {
+  color: 'var(--dsw-alias-state-warn-label)',
   margin: 0,
   fontSize: 12,
   lineHeight: '18px',
@@ -333,36 +353,6 @@ const hintStyle: CSSProperties = {
 }
 /** models `.rowHead` gap 10 with `.modelRow`'s centred alignment between two field stacks. */
 const fieldRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 10 }
-/**
- * models `.editorActions`' `space-between` idiom for the 超时 / 报错 row: the
- * field on the left, the checkbox and its label flush at the right end.
- * `flex-start` (measured, .recon/row-mock) keeps the choices cell off the
- * column's bottom: with `flex-end`, a 超时 validation hint grows the left column
- * and drags the checkbox 25px down with it.
- */
-const timeoutRowStyle: CSSProperties = { justifyContent: 'space-between', alignItems: 'flex-start', display: 'flex' }
-/** The 超时 field takes half the row so the choices cell can sit flush at the right end. */
-const timeoutFieldStyle: CSSProperties = { flex: '0 1 50%' }
-/**
- * The choices cell, centred on the input's rendered box: it clears the field's
- * caption line and stack gap, then repeats the kit Input's own box model —
- * `.wrap` is `height:32px` in `content-box` with a `.5px` border, which
- * Chromium resolves to 33–34px depending on the device pixel ratio — so its
- * centre lands on the input's centre at every DPR instead of half a border
- * below (measured 0.00px at DPR 1 and 2, hint or no hint; .recon/row-mock).
- * Only the vertical borders borrow the box model: a transparent one costs no
- * ink but would push the label 0.5–1px inside the row's right edge, and the two
- * ends are meant to be flush.
- */
-const checkboxCellStyle: CSSProperties = {
-  marginTop: 24,
-  boxSizing: 'content-box',
-  height: 32,
-  borderTop: '.5px solid transparent',
-  borderBottom: '.5px solid transparent',
-  alignItems: 'center',
-  display: 'flex',
-}
 /** models `.editorHeader` title side; `space-between` + `flex-start` are the user's instruction. */
 const editorHeaderStyle: CSSProperties = {
   justifyContent: 'space-between',
@@ -376,14 +366,14 @@ const editorTitleStyle: CSSProperties = {
   fontWeight: 500,
   lineHeight: '22px',
 }
-/** models `.editorActions` — the footer row split so 测试 sits alone on the left. */
-const formActionsStyle: CSSProperties = { justifyContent: 'space-between', alignItems: 'center', display: 'flex' }
-/** models `.editorActions` cluster (`justify-content:flex-end;gap:8px`) on the footer's right. */
-const formActionsEndStyle: CSSProperties = {
+/**
+ * models `.editorActions` — the footer's action cluster
+ * (`justify-content:flex-end;gap:8px`).
+ */
+const formActionsStyle: CSSProperties = {
   justifyContent: 'flex-end',
   alignItems: 'center',
   gap: 8,
-  marginLeft: 'auto',
   display: 'flex',
 }
 /** models `.input` tokens; the kit ships no textarea, so this is the one native control. */
@@ -403,6 +393,61 @@ const textareaStyle: CSSProperties = {
 }
 /** models `.dangerButton` colour on the kit's ghost button. */
 const dangerButtonStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
+/** models `.modelList` — the request-header rows. */
+const headerListStyle: CSSProperties = { flexDirection: 'column', gap: 8, display: 'flex' }
+/**
+ * models `.modelRow` minus its chevron column: the header name, its value, and
+ * the row's own action. The `>` control the models page keeps in the third
+ * column is deliberately NOT reproduced — the row carries its delete alone, and
+ * (per the user's read of the result on screen) so is that page's `.modelEntry`
+ * frame: the rows here are the list's own items.
+ */
+const headerRowStyle: CSSProperties = {
+  gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr) auto',
+  alignItems: 'center',
+  gap: 6,
+  display: 'grid',
+}
+/** models `.iconButton`'s 28px box in the `.iconButtonDanger` colour, on the kit's ghost `sm` Button. */
+const rowIconButtonStyle: CSSProperties = { ...refreshButtonStyle, ...dangerButtonStyle }
+/** models `.addModelButton`'s placement on the kit's outline `sm` Button (its box is the kit's). */
+const headerAddButtonStyle: CSSProperties = { alignSelf: 'flex-start' }
+
+/** `useLayoutEffect` on the client; the server render (the render harness) has no DOM. */
+const useDomLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
+
+/**
+ * Keep the settings page's width constant while a card is expanded.
+ *
+ * The settings panel is a fixed 800px dialog whose `.wCInkW_options` column
+ * (`flex:1; padding:0 24px 24px; overflow-y:auto`) is the scroll container our
+ * page is rendered into: 800 − 188 (nav) − 48 (padding) leaves 564px, so the
+ * page is never as wide as its own `max-width:720`. As soon as an expanded
+ * editor makes the column taller than the dialog, Chromium adds a 15px classic
+ * scrollbar and the column's client width drops to 597 — the page shrinks from
+ * 564 to 549 with its left edge fixed, which is the visible "narrowing" (all
+ * figures measured in .recon/panel-mock at DPR 1).
+ *
+ * The scroller belongs to the settings shell, not to this plugin, so the one
+ * lever here is `scrollbar-gutter: stable` on it: the gutter is then reserved
+ * whether or not a scrollbar is drawn, and the page keeps ONE width in both
+ * states. The previous inline value is restored when the page unmounts.
+ * @param ref - the page's root element.
+ */
+function useStablePageGutter(ref: RefObject<HTMLElement>): void {
+  useDomLayoutEffect(() => {
+    const root = ref.current
+    if (root === null) return undefined
+    for (let node = root.parentElement; node !== null; node = node.parentElement) {
+      const overflowY = window.getComputedStyle(node).overflowY
+      if (overflowY !== 'auto' && overflowY !== 'scroll') continue
+      const previous = node.style.scrollbarGutter
+      node.style.scrollbarGutter = 'stable'
+      return () => { node.style.scrollbarGutter = previous }
+    }
+    return undefined
+  }, [ref])
+}
 
 /** Map a host/business error (or anything thrown) to localized copy. */
 function errorMessage(error: unknown, t: TranslateNS<typeof NS>): string {
@@ -411,7 +456,7 @@ function errorMessage(error: unknown, t: TranslateNS<typeof NS>): string {
       case 'duplicate-id': return t('errDuplicateId')
       case 'duplicate-server-name': return t('errDuplicateName')
       case 'invalid-config': return t('errInvalidConfig')
-      case 'not-found': return t('errNotFound')
+      case 'bridge-missing': return t('errBridgeMissing')
       // Codes this panel has no copy for fall back to the host's own prose.
       default: return error.message.replace(/^[a-z-]+: /, '')
     }
@@ -420,8 +465,44 @@ function errorMessage(error: unknown, t: TranslateNS<typeof NS>): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Derive the visual status of one server. */
-function statusOf(server: McpServerInfo): ServerStatus {
+/** The one-line result a successful add/update leaves under the heading. */
+type NoticeKey =
+  | 'noticeOAuth'
+  | 'noticeOAuthMissing'
+  | 'noticePlain'
+  | 'noticeUnknownAdd'
+  | 'noticeUnknownEdit'
+
+/** The notices that carry attention rather than a plain confirmation (models `.notice`). */
+const WARN_NOTICES: readonly NoticeKey[] = [
+  'noticeOAuthMissing',
+  'noticeUnknownAdd',
+  'noticeUnknownEdit',
+]
+
+/**
+ * The notice a save result asks for, or `null` when the host reported nothing.
+ * An OAuth endpoint this profile cannot serve is the loudest case; otherwise
+ * `'unreachable'` reads differently for a new row (it went in as a plain
+ * Streamable HTTP server) than for an edit (its owner is unchanged).
+ * @param result - what the host reported about the written row.
+ * @param added - whether this save created the row.
+ */
+function noticeOf(result: SaveResult | undefined, added: boolean): NoticeKey | null {
+  if (result?.probe === 'oauth') {
+    return result.oauthBridgeMissing === true ? 'noticeOAuthMissing' : 'noticeOAuth'
+  }
+  if (result?.probe === 'plain') return 'noticePlain'
+  if (result?.probe === 'unreachable') return added ? 'noticeUnknownAdd' : 'noticeUnknownEdit'
+  return null
+}
+
+/**
+ * Derive the visual status of one server from its fiber phase. Every phase has
+ * its own word, so the chip shows how far the connection has come instead of
+ * collapsing the wait into one state. (Exported for the render harness.)
+ */
+export function statusOf(server: McpServerInfo): ServerStatus {
   if (!server.enabled) return { dot: 'idle', tone: 'neutral', key: 'statusDisabled' }
   switch (server.fiberPhase) {
     case 'active':
@@ -443,6 +524,7 @@ function statusOf(server: McpServerInfo): ServerStatus {
     case 'unloading':
       return { dot: 'ongoing', tone: 'warning', key: 'statusUnloading' }
     default:
+      // `null`: the host knows the row but the loader has not built a fiber yet.
       return { dot: 'idle', tone: 'outline', key: 'statusNotLoaded' }
   }
 }
@@ -452,6 +534,8 @@ function statusOf(server: McpServerInfo): ServerStatus {
  * @param props - the locale namespace's translate.
  */
 export function McpManagerSection({ t }: SectionProps): JSX.Element {
+  const pageRef = useRef<HTMLElement>(null)
+  useStablePageGutter(pageRef)
   const [servers, setServers] = useState<McpServerInfo[]>([])
   const [patchInfo, setPatchInfo] = useState<PatchInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -459,9 +543,9 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   const [adding, setAdding] = useState(false)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
-  const [probes, setProbes] = useState<Record<string, McpProbeResult>>({})
   const [removing, setRemoving] = useState<McpServerInfo | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
+  const [notice, setNotice] = useState<NoticeKey | null>(null)
 
   const anyExpanded = Object.values(expanded).some((open) => open === true)
   const formOpen = adding || anyExpanded
@@ -534,10 +618,15 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     }
   }, [refresh])
 
-  /** Run one action behind the busy flag, then revalidate with a quiet read. */
+  /**
+   * Run one action behind the busy flag, then revalidate with a quiet read. A
+   * new action retires the previous notice, so a stale result cannot outlive
+   * the operation that produced it.
+   */
   const run = useCallback(async (action: () => Promise<unknown>, label: string) => {
     setBusy(label)
     setError(null)
+    setNotice(null)
     try {
       await action()
       await refresh({ quiet: true })
@@ -552,13 +641,6 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     (server: McpServerInfo): string => server.serverName || t('unnamed'),
     [t],
   )
-
-  const testConnection = useCallback((server: McpServerInfo) => {
-    void run(async () => {
-      const result = await callRpc<McpProbeResult>('probe', { id: server.id })
-      setProbes((prev) => ({ ...prev, [server.id]: result }))
-    }, `probe:${server.id}`)
-  }, [run])
 
   const beginAdd = useCallback(() => setAdding(true), [])
   const closeAdd = useCallback(() => setAdding(false), [])
@@ -581,16 +663,18 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     void run(() => callRpc('remove', { id: target.id }), `remove:${target.id}`)
   }, [removing, run])
 
-  /** The add card saved: close it, then revalidate with a quiet read. */
-  const savedAdd = useCallback(() => {
+  /** The add card saved: close it, re-read the list, then report the probe. */
+  const savedAdd = useCallback(async (result?: SaveResult) => {
     setAdding(false)
-    void run(() => Promise.resolve(), 'form:add')
+    await run(() => Promise.resolve(), 'form:add')
+    setNotice(noticeOf(result, true))
   }, [run])
 
-  /** A card's form saved: collapse the card, then revalidate with a quiet read. */
-  const savedEdit = useCallback((id: string) => {
+  /** A card's form saved: collapse the card, re-read the list, then report the result. */
+  const savedEdit = useCallback(async (id: string, result?: SaveResult) => {
     closeCard(id)
-    void run(() => Promise.resolve(), `form:update:${id}`)
+    await run(() => Promise.resolve(), `form:update:${id}`)
+    setNotice(noticeOf(result, false))
   }, [closeCard, run])
 
   const toggleEnabled = useCallback((server: McpServerInfo) => {
@@ -619,7 +703,7 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   }, [summary, t])
 
   return (
-    <section style={sectionStyle}>
+    <section style={sectionStyle} ref={pageRef} data-mcp-manager-page="true">
       {/*
        * The 插件页 header: heading block on the left, `.toolbar` at the right
        * edge of the same row. Refresh is the kit's ghost Button wearing the
@@ -650,7 +734,7 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
               aria-label={t('refresh')}
               aria-busy={loading}
               disabled={loading || busy !== null}
-              onClick={() => void refresh()}
+              onClick={() => { setNotice(null); void refresh() }}
             >
               <span style={iconWrapStyle} aria-hidden="true">
                 {loading ? <StateDot state="ongoing" size={18} /> : <IconRefreshOutlineRegular />}
@@ -671,6 +755,12 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
       </header>
 
       {error !== null ? <p style={errorLineStyle} role="alert">{error}</p> : null}
+
+      {notice !== null ? (
+        <p style={WARN_NOTICES.includes(notice) ? noticeWarnStyle : noticeStyle} role="status">
+          {t(notice)}
+        </p>
+      ) : null}
 
       {loading && servers.length === 0 && !formOpen ? (
         <p style={statusLineStyle} role="status">
@@ -704,10 +794,10 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
           const status = statusOf(server)
           const statusText = t(status.key, status.count !== undefined ? { count: status.count } : undefined)
           const open = expanded[server.id] === true
-          const probe = probes[server.id]
-          const probing = busy === `probe:${server.id}`
           const failed = server.enabled && server.fiberPhase === 'failed'
-          const oauth = server.ownerPackage === MCP_OAUTH_CLIENT_PACKAGE
+          // The host alone knows whether this row's bridge resolves; when it does
+          // not, the row was written disabled and the host refuses to switch it on.
+          const bridgeMissing = server.bridgeMissing === true
           const regionId = `mcp-details-${server.id}`
           return (
             <li
@@ -720,11 +810,13 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                 {/*
                  * The title area is the disclosure toggle (inventory
                  * `cardContent` as a bare button): name, then the identity
-                 * chips — status/tools, transport (or the connecting chip until
-                 * the phase resolves), OAuth — and the chevron. The enable
-                 * Switch lives outside it in `rowActions`, so a collapsed card
-                 * stays toggleable and clicking the Switch never toggles the
-                 * card. 删除 belongs to the inner panel's header.
+                 * chips — status/tools, transport — and the chevron. The
+                 * transport chip is a written-down property of the row and
+                 * never changes with the connection; the status chip walks
+                 * every phase the fiber goes through. The enable Switch lives
+                 * outside in `rowActions`, so a collapsed card stays toggleable
+                 * and clicking the Switch never toggles the card. 删除 belongs
+                 * to the inner panel's header.
                  */}
                 <button
                   type="button"
@@ -735,24 +827,38 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                 >
                   <span style={rowNameStyle}>{displayName(server)}</span>
                   <Tag tone={status.tone}>{statusText}</Tag>
-                  {isConnecting(server)
-                    ? <Tag tone="neutral">{t('connecting')}</Tag>
-                    : <Tag tone="neutral">{TRANSPORT_LABELS[server.transport]}</Tag>}
-                  {oauth ? <Tag tone="info">OAuth</Tag> : null}
+                  <Tag tone="neutral">{TRANSPORT_LABELS[server.transport]}</Tag>
                   <span style={{ ...chevronWrapStyle, transform: open ? 'rotate(180deg)' : 'none' }}>
                     <IconChevronDownOutlineRegular size={12} />
                   </span>
                 </button>
 
-                <span style={rowActionsStyle}>
-                  <Switch
-                    checked={server.enabled}
-                    label={t('enable')}
-                    title={server.enabled ? t('disable') : t('enable')}
-                    disabled={actionsDisabled}
-                    onChange={() => toggleEnabled(server)}
-                  />
-                </span>
+                {/*
+                 * The tooltip's anchor is the whole `rowActions` span, not the
+                 * Switch: a disabled button fires no pointer events, so a tooltip
+                 * anchored on it could never explain why the row cannot be
+                 * switched on. The bubble is portaled, so the row's layout (and
+                 * the span's `margin-left:auto`) is unchanged.
+                 */}
+                <Tooltip
+                  label={t('switchBridgeMissing')}
+                  side="bottom"
+                  align="end"
+                  delayMs={500}
+                  focusDelayMs={500}
+                  portal
+                  disabled={!bridgeMissing}
+                >
+                  <span style={rowActionsStyle}>
+                    <Switch
+                      checked={server.enabled}
+                      label={t('enable')}
+                      title={server.enabled ? t('disable') : t('enable')}
+                      disabled={actionsDisabled || bridgeMissing}
+                      onChange={() => toggleEnabled(server)}
+                    />
+                  </span>
+                </Tooltip>
               </div>
 
               {open ? (
@@ -760,14 +866,10 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                   <ServerForm
                     t={t}
                     initial={server}
-                    oauth={oauth}
                     busy={busy !== null}
-                    probe={probe}
-                    probing={probing}
-                    onTest={() => testConnection(server)}
                     onRemove={() => requestRemove(server)}
                     onCancel={() => closeCard(server.id)}
-                    onSaved={() => savedEdit(server.id)}
+                    onSaved={(result) => void savedEdit(server.id, result)}
                   />
                 </div>
               ) : null}
@@ -808,18 +910,28 @@ interface ServerFormProps {
   t: TranslateNS<typeof NS>
   /** Absent for the add form; the row being edited otherwise. */
   initial?: McpServerInfo | undefined
-  /** The row is owned by the OAuth bridge: its transport is fixed, so the selector is hidden. */
-  oauth?: boolean | undefined
   busy: boolean
-  /** Latest probe of this server, shown inside the panel. */
-  probe?: McpProbeResult | undefined
-  probing?: boolean | undefined
-  /** Edit only: run the connectivity test (footer, left). */
-  onTest?: (() => void) | undefined
   /** Edit only: open the remove confirmation (panel header, right). */
   onRemove?: (() => void) | undefined
   onCancel: () => void
-  onSaved: () => void
+  /** Saved: what the host reported back about the written row. */
+  onSaved: (result?: SaveResult) => void
+}
+
+/**
+ * What the host reports about a row it just wrote: how it classified the
+ * endpoint (`probe`), and — when that classification needs the OAuth bridge —
+ * whether this profile actually has it installed.
+ */
+interface SaveResult {
+  probe?: McpOAuthProbe
+  oauthBridgeMissing?: boolean
+}
+
+/** One editable request header: the two inputs of a row. */
+interface HeaderRow {
+  key: string
+  value: string
 }
 
 interface FormState {
@@ -831,14 +943,19 @@ interface FormState {
   argsText: string
   envText: string
   cwd: string
-  headersText: string
+  headers: HeaderRow[]
   toolCallTimeoutMs: string
+  /**
+   * The bridges' "fail on startup error" switch. It has no control any more —
+   * a new server always takes the bridges' own `false` default (the key is
+   * omitted) — but an existing row that states `true` keeps it through an
+   * unrelated edit instead of being silently reset.
+   */
   failOnStartupError: boolean
-  /** OAuth rows only: the credential reference the bridge stores its OAuth state under. */
-  credentialRef: string
-  /** OAuth rows only: the loopback callback port (`0` = OS-assigned). */
-  callbackPort: string
 }
+
+/** One blank header row: a form always opens with at least one place to type. */
+const EMPTY_HEADER: HeaderRow = { key: '', value: '' }
 
 const EMPTY_FORM: FormState = {
   id: '',
@@ -849,15 +966,18 @@ const EMPTY_FORM: FormState = {
   argsText: '',
   envText: '',
   cwd: '',
-  headersText: '',
+  headers: [EMPTY_HEADER],
   toolCallTimeoutMs: '',
   failOnStartupError: false,
-  credentialRef: '',
-  callbackPort: '',
 }
 
-function toForm(server: McpServerInfo | undefined): FormState {
+/**
+ * The draft the form opens on. (Exported for the render harness.)
+ * @param server - the row being edited, absent for the add form.
+ */
+export function toForm(server: McpServerInfo | undefined): FormState {
   if (server === undefined) return EMPTY_FORM
+  const headers = Object.entries(server.headers ?? {}).map(([key, value]) => ({ key, value }))
   return {
     id: server.id,
     serverName: server.serverName,
@@ -867,11 +987,9 @@ function toForm(server: McpServerInfo | undefined): FormState {
     argsText: (server.args ?? []).join('\n'),
     envText: (server.env !== undefined ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`) : []).join('\n'),
     cwd: server.cwd ?? '',
-    headersText: (server.headers !== undefined ? Object.entries(server.headers).map(([k, v]) => `${k}: ${v}`) : []).join('\n'),
+    headers: headers.length > 0 ? headers : [EMPTY_HEADER],
     toolCallTimeoutMs: server.toolCallTimeoutMs !== undefined ? String(server.toolCallTimeoutMs) : '',
     failOnStartupError: server.failOnStartupError === true,
-    credentialRef: server.credentialRef ?? '',
-    callbackPort: server.callbackPort !== undefined ? String(server.callbackPort) : '',
   }
 }
 
@@ -907,40 +1025,45 @@ function parsePairs(text: string): Record<string, string> | undefined {
 }
 
 /**
- * Build the wire config from the draft. OAuth-owned rows also carry the two
- * bridge keys the form exposes; the host validates them and merges the bridge's
- * other keys onto the row.
+ * Build the wire config from the draft. Only the fields the panel shows travel;
+ * the host validates them and preserves every other key of an existing row
+ * (the OAuth bridge's `credentialRef`, `scope`, `callbackPort`, …).
+ *
+ * `transport` always travels, because the host routes a row by it. The OAuth
+ * bridge has no `transport` field of its own, so the host projects the config
+ * onto the bridge's schema and drops the key there.
  * @param form - the current draft.
- * @param oauth - whether this row is owned by the OAuth bridge.
- * @returns the config payload.
+ * @returns the config payload. (Exported for the render harness.)
  */
-function toConfig(form: FormState, oauth: boolean): McpServerConfig {
+export function toConfig(form: FormState): McpServerConfig {
   const config: McpServerConfig = {
     serverName: form.serverName.trim(),
     transport: form.transport,
   }
-  if (form.transport === 'streamable-http') {
-    if (form.url.trim() !== '') config.url = form.url.trim()
-  } else {
+  if (form.transport === 'stdio') {
     if (form.command.trim() !== '') config.command = form.command.trim()
     const args = splitLines(form.argsText)
     if (args.length > 0) config.args = args
     const env = parsePairs(form.envText)
     if (env !== undefined) config.env = env
     if (form.cwd.trim() !== '') config.cwd = form.cwd.trim()
+  } else {
+    if (form.url.trim() !== '') config.url = form.url.trim()
   }
-  const headers = parsePairs(form.headersText)
-  if (headers !== undefined) config.headers = headers
+  // A row without a name is just a blank line the form keeps for typing, so it
+  // is dropped; a name typed twice keeps the last value, in row order.
+  const headers: Record<string, string> = {}
+  for (const row of form.headers) {
+    const name = row.key.trim()
+    if (name !== '') headers[name] = row.value.trim()
+  }
+  if (Object.keys(headers).length > 0) config.headers = headers
   if (form.toolCallTimeoutMs.trim() !== '' && Number.isFinite(Number(form.toolCallTimeoutMs))) {
     config.toolCallTimeoutMs = Number(form.toolCallTimeoutMs)
   }
+  // Only a preserved `true` travels: a new server leaves the key out and takes
+  // the bridge's own (`false`) default.
   if (form.failOnStartupError) config.failOnStartupError = true
-  if (oauth) {
-    if (form.credentialRef.trim() !== '') config.credentialRef = form.credentialRef.trim()
-    if (form.callbackPort.trim() !== '' && Number.isFinite(Number(form.callbackPort))) {
-      config.callbackPort = Number(form.callbackPort)
-    }
-  }
   return config
 }
 
@@ -966,26 +1089,32 @@ function Field({ labelFor, label, hint, style, children }: {
 }
 
 /**
- * Add/edit server form built from the kit's Input, SegmentedControl, Checkbox
- * and Button. When editing, the id field is locked and the footer carries the
- * connectivity test; the transport selector is hidden for OAuth-owned rows,
- * whose transport is fixed and whose other keys the host merges.
+ * Add/edit server form built from the kit's Input, Button and SegmentedControl
+ * plus the one native control the kit does not ship (the args/env textareas).
+ * When editing, the id field is locked.
+ *
+ * Request headers are a row list (models `ModelListEditor` without its chevron
+ * column): each row is a name input, a value input and its delete action, and
+ * the list's add action sits under it. A name-less row is a blank line the form
+ * keeps for typing, never a written key; a value is taken verbatim, so a `:` or
+ * `=` inside it can no longer be misread.
+ *
+ * Both forms carry the same two transport choices: which bridge package
+ * implements a choice is the manager's business, and streamable-http always
+ * goes to the OAuth bridge, which authorizes only when the server asks. An
+ * existing row's other keys are the host's to preserve.
  *
  * Validation is the host's: the submit sends the draft and renders whatever
  * field errors come back (`McpManagerRpcError.fields`), so the panel never
  * keeps a second copy of the bridge package's schema rules.
  *
  * @param props - form context and callbacks.
- * @returns the form panel: header row (title + remove), fields, probe line, footer.
+ * @returns the form panel: header row (title + remove), fields, footer.
  */
 export function ServerForm({
   t,
   initial,
-  oauth,
   busy,
-  probe,
-  probing,
-  onTest,
   onRemove,
   onCancel,
   onSaved,
@@ -1000,14 +1129,32 @@ export function ServerForm({
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
+  /** Replace one header row's field; the list itself is replaced, never mutated. */
+  const setHeader = (index: number, patch: Partial<HeaderRow>): void => {
+    setForm((prev) => ({
+      ...prev,
+      headers: prev.headers.map((row, at) => (at === index ? { ...row, ...patch } : row)),
+    }))
+  }
+
+  const addHeader = (): void => {
+    setForm((prev) => ({ ...prev, headers: [...prev.headers, EMPTY_HEADER] }))
+  }
+
+  const removeHeader = (index: number): void => {
+    setForm((prev) => ({ ...prev, headers: prev.headers.filter((_, at) => at !== index) }))
+  }
+
   const submit = async (): Promise<void> => {
     setSaving(true)
     setSubmitError(null)
     setFieldErrors({})
     try {
-      const payload = { id: form.id.trim(), config: toConfig(form, oauth === true) }
-      await callRpc(editing ? 'update' : 'add', payload)
-      onSaved()
+      const payload = { id: form.id.trim(), config: toConfig(form) }
+      // The host classifies the endpoint while it writes the row; an older host
+      // simply leaves the fields out and the panel shows no notice.
+      const reply = await callRpc<SaveResult>(editing ? 'update' : 'add', payload)
+      onSaved(reply)
     } catch (err) {
       setFieldErrors(err instanceof McpManagerRpcError ? err.fields ?? {} : {})
       setSubmitError(errorMessage(err, t))
@@ -1064,20 +1211,18 @@ export function ServerForm({
         </Field>
       </div>
 
-      {oauth === true ? null : (
-        <Field label={t('fieldTransport')}>
-          <SegmentedControl
-            id="dshmcp-transport"
-            value={form.transport}
-            options={TRANSPORT_OPTIONS}
-            label={t('fieldTransport')}
-            disabled={locked}
-            onChange={(next) => set('transport', next)}
-          />
-        </Field>
-      )}
+      <Field label={t('fieldTransport')} hint={err('transport')}>
+        <SegmentedControl
+          id="dshmcp-transport"
+          value={form.transport}
+          options={TRANSPORT_OPTIONS}
+          onChange={(next) => set('transport', next)}
+          label={t('fieldTransport')}
+          disabled={locked}
+        />
+      </Field>
 
-      {form.transport === 'streamable-http' ? (
+      {form.transport !== 'stdio' ? (
         <Field labelFor="dshmcp-url" label={t('fieldUrl')} hint={err('url')}>
           <Input
             id="dshmcp-url"
@@ -1139,130 +1284,90 @@ export function ServerForm({
         </>
       )}
 
-      {/* OAuth-owned rows carry these two bridge keys; the host validates them and merges the rest. */}
-      {oauth === true ? (
-        <div style={fieldRowStyle}>
-          <Field labelFor="dshmcp-credential" label={t('fieldCredentialRef')} hint={err('credentialRef')}>
-            <Input
-              id="dshmcp-credential"
-              value={form.credentialRef}
-              placeholder="CLOUDFLARE_MCP_OAUTH"
-              spellCheck={false}
-              aria-invalid={err('credentialRef') !== undefined}
-              disabled={locked}
-              onChange={(e) => set('credentialRef', e.target.value)}
-            />
-          </Field>
-          <Field labelFor="dshmcp-callback-port" label={t('fieldCallbackPort')} hint={err('callbackPort')}>
-            <Input
-              id="dshmcp-callback-port"
-              value={form.callbackPort}
-              inputMode="numeric"
-              placeholder="45871"
-              aria-invalid={err('callbackPort') !== undefined}
-              disabled={locked}
-              onChange={(e) => set('callbackPort', e.target.value.replace(/[^0-9]/g, ''))}
-            />
-          </Field>
+      {/*
+       * models `ModelListEditor` without its `.modelEntry` frame: each header is
+       * one `.modelRow` grid and a direct item of the list, then the add action
+       * aligned to the field's left edge. Our row also drops the chevron column.
+       */}
+      <Field label={t('fieldHeaders')} hint={err('headers')}>
+        <div style={headerListStyle}>
+          {form.headers.map((row, index) => (
+            <div style={headerRowStyle} key={index}>
+              <Input
+                value={row.key}
+                placeholder="Authorization"
+                aria-label={`${t('headerName')} ${String(index + 1)}`}
+                spellCheck={false}
+                disabled={locked}
+                onChange={(e) => setHeader(index, { key: e.target.value })}
+              />
+              <Input
+                value={row.value}
+                placeholder="Bearer xxx"
+                aria-label={`${t('headerValue')} ${String(index + 1)}`}
+                spellCheck={false}
+                disabled={locked}
+                onChange={(e) => setHeader(index, { value: e.target.value })}
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                style={rowIconButtonStyle}
+                icon={<IconTrashOutlineRegular size={14} />}
+                aria-label={`${t('remove')} ${String(index + 1)}`}
+                title={t('remove')}
+                disabled={locked}
+                onClick={() => removeHeader(index)}
+              />
+            </div>
+          ))}
         </div>
-      ) : null}
-
-      <Field labelFor="dshmcp-headers" label={t('fieldHeaders')} hint={err('headers')}>
-        <textarea
-          id="dshmcp-headers"
-          style={textareaStyle}
-          rows={2}
-          value={form.headersText}
-          placeholder="Authorization: Bearer xxx"
-          spellCheck={false}
+        <Button
+          variant="outline"
+          size="sm"
+          style={headerAddButtonStyle}
+          icon={<IconPlusOutlineRegular size={14} />}
           disabled={locked}
-          onChange={(e) => set('headersText', e.target.value)}
+          onClick={addHeader}
+        >
+          {t('addHeader')}
+        </Button>
+      </Field>
+
+      <Field labelFor="dshmcp-timeout" label={t('fieldTimeout')} hint={err('toolCallTimeoutMs')}>
+        <Input
+          id="dshmcp-timeout"
+          value={form.toolCallTimeoutMs}
+          inputMode="numeric"
+          placeholder="60000"
+          aria-invalid={err('toolCallTimeoutMs') !== undefined}
+          disabled={locked}
+          onChange={(e) => set('toolCallTimeoutMs', e.target.value.replace(/[^0-9]/g, ''))}
         />
       </Field>
 
-      <div style={timeoutRowStyle}>
-        <Field
-          labelFor="dshmcp-timeout"
-          label={t('fieldTimeout')}
-          hint={err('toolCallTimeoutMs')}
-          style={timeoutFieldStyle}
-        >
-          <Input
-            id="dshmcp-timeout"
-            value={form.toolCallTimeoutMs}
-            inputMode="numeric"
-            placeholder="60000"
-            aria-invalid={err('toolCallTimeoutMs') !== undefined}
-            disabled={locked}
-            onChange={(e) => set('toolCallTimeoutMs', e.target.value.replace(/[^0-9]/g, ''))}
-          />
-        </Field>
-        <div style={checkboxCellStyle}>
-          {/* The kit Checkbox owns its input and renders the label beside it. */}
-          <Checkbox
-            checked={form.failOnStartupError}
-            label={t('fieldFailStartup')}
-            disabled={locked}
-            onChange={(next) => set('failOnStartupError', next)}
-          />
-        </div>
-      </div>
-
       {submitError !== null ? <p style={errorLineStyle} role="alert">{submitError}</p> : null}
 
-      {/* inventory `.statusWithDot` + `.status`/`.failure`: the probe sentence stays in the panel. */}
-      {probe !== undefined ? (
-        probe.skipped === true ? (
-          <p style={statusLineStyle}>
-            <span style={dotSlotStyle}><StateDot state="warning" size={10} /></span>
-            <span style={statusTextStyle}>{t('probeSkipped')} {probe.error ?? ''}</span>
-          </p>
-        ) : probe.ok ? (
-          <p style={statusLineStyle}>
-            <span style={dotSlotStyle}><StateDot state="done" size={10} /></span>
-            <span style={statusTextStyle}>
-              {t('probeOk', {
-                ms: String(probe.latencyMs),
-                count: probe.toolCount !== undefined ? String(probe.toolCount) : '?',
-              })}
-            </span>
-          </p>
-        ) : (
-          <p style={statusLineStyle}>
-            <span style={dotSlotStyle}><StateDot state="error" size={10} /></span>
-            <span style={failureStyle}>
-              {t('probeFail', { error: probe.error ?? 'failed', ms: String(probe.latencyMs) })}
-            </span>
-          </p>
-        )
-      ) : null}
-
+      {/*
+       * models `.editorActions` (`justify-content:flex-end;gap:8px`): one 28px
+       * action row on the kit's `sm` Button, the row scale the panel already
+       * uses for its chrome. The 14px gap above it is the editor column's own
+       * `gap` (models `.editor`), exactly as there.
+       */}
       <div style={formActionsStyle}>
-        {editing && onTest !== undefined ? (
-          <Button
-            variant="outline"
-            size="sm"
-            icon={probing === true ? <StateDot state="ongoing" size={14} /> : undefined}
-            onClick={onTest}
-            disabled={locked}
-          >
-            {t('test')}
-          </Button>
-        ) : null}
-        <span style={formActionsEndStyle}>
-          <Button variant="outline" size="sm" onClick={onCancel} disabled={saving}>
-            {t('cancel')}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            icon={saving ? <StateDot state="ongoing" size={14} /> : undefined}
-            onClick={() => void submit()}
-            disabled={locked}
-          >
-            {editing ? t('save') : t('addMcp')}
-          </Button>
-        </span>
+        <Button variant="outline" size="sm" onClick={onCancel} disabled={saving}>
+          {t('cancel')}
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          icon={saving ? <StateDot state="ongoing" size={14} /> : undefined}
+          onClick={() => void submit()}
+          disabled={locked}
+        >
+          {/* Both forms save: the add card is a form's save, not a page action. */}
+          {t('save')}
+        </Button>
       </div>
     </>
   )
