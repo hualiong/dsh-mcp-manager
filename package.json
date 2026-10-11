@@ -66,6 +66,15 @@
     "react-dom": "^18.2.0",
     "typescript": "^5.9.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hualiong/dsh-mcp-manager.git"
+  },
+  "homepage": "https://github.com/hualiong/dsh-mcp-manager#readme",
+  "bugs": {
+    "url": "https://github.com/hualiong/dsh-mcp-manager/issues"
+  },
+  "author": "hualiong",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
