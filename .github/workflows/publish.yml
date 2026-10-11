@@ -1,25 +1,29 @@
 name: Publish to npm
 
-# 推送到 GitHub 后自动发布到 npm：
-#   1) 打标签  git tag v0.1.x && git push origin v0.1.x
-#   2) 或手动  Actions → “Publish to npm” → Run workflow
-# 需要先在仓库设置里配置 NPM_TOKEN secret（npmjs.com → Access tokens →
-# Automation/publish token，且必须勾选 Bypass 2FA —— 无 2FA 账号发布必需）。
+# Publishes a version tag with npm trusted publishing (OIDC): no NPM_TOKEN and no
+# 2FA prompt. Configure once on the package page:
+#   https://www.npmjs.com/package/@hualiong/dsh-mcp-manager
+#   → Settings → Trusted Publisher → GitHub Actions
+#     organization/user: hualiong
+#     repository:        dsh-mcp-manager
+#     workflow filename: publish.yml
+#     environment:       (leave empty)
+#     allowed actions:   Allow npm publish
+# Release:  git tag v0.1.x && git push origin <branch> v0.1.x
+# Manual:   Actions → "Publish to npm" → Run workflow (no tag to verify)
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      # Job-level so pnpm/.npmrc can read it (step-level env is too late and
-      # triggers "[WARN] Failed to replace env in config").
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
@@ -31,13 +35,21 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
+          # Deliberately no registry-url: it writes an empty
+          # //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN} placeholder into
+          # .npmrc, which shadows the OIDC credential this workflow relies on.
+
+      - name: Trusted publishing needs npm >= 11.5.1
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build
         run: pnpm build
+
+      - name: Test
+        run: pnpm test
 
       # Only meaningful for tag-triggered runs; a manual dispatch has no tag
       # (GITHUB_REF_NAME is the branch), so it is skipped there.
@@ -67,4 +79,4 @@ jobs:
 
       - name: Publish to npm
         if: steps.check-publish.outputs.skip_publish != 'true'
-        run: npm publish
+        run: npm publish --access public --provenance
