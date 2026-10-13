@@ -31,8 +31,7 @@ export type McpManagerKeys =
   | 'patchMissing'
   | 'removeTitle'
   | 'removeDesc'
-  | 'removeAck'
-  | 'statusActiveNoTools'
+  | 'statusNotConnected'
   | 'statusFailed'
   | 'statusDisabled'
   | 'statusNotLoaded'
@@ -44,6 +43,7 @@ export type McpManagerKeys =
   | 'disable'
   | 'switchBridgeMissing'
   | 'remove'
+  | 'removing'
   | 'formAddTitle'
   | 'formEditTitle'
   | 'fieldId'
@@ -98,8 +98,7 @@ export const zh: McpManagerDict = {
   patchMissing: '补丁文件缺失',
   removeTitle: '删除 MCP 服务器',
   removeDesc: '将从 cordis.patch.yml 中删除“{name}”（{id}），并断开它的全部工具。此操作不可恢复。',
-  removeAck: '我了解这会修改 cordis.patch.yml 并断开该服务器的工具',
-  statusActiveNoTools: '无工具',
+  statusNotConnected: '未连接',
   statusFailed: '失败',
   statusDisabled: '已停用',
   statusNotLoaded: '未加载',
@@ -111,6 +110,7 @@ export const zh: McpManagerDict = {
   disable: '停用',
   switchBridgeMissing: '需要先安装 @hualiong/dsh-oauth-mcp-client 才能启用',
   remove: '删除',
+  removing: '正在删除“{name}”…',
   formAddTitle: '添加 MCP 服务器',
   formEditTitle: '编辑 {name}',
   fieldId: '插件 ID',
@@ -157,8 +157,7 @@ export const en: McpManagerDict = {
   patchMissing: 'patch file missing',
   removeTitle: 'Remove MCP server',
   removeDesc: 'This removes "{name}" ({id}) from cordis.patch.yml and disconnects all of its tools. It cannot be undone.',
-  removeAck: 'I understand this edits cordis.patch.yml and disconnects this server’s tools',
-  statusActiveNoTools: 'No tools',
+  statusNotConnected: 'Not connected',
   statusFailed: 'Failed',
   statusDisabled: 'Disabled',
   statusNotLoaded: 'Not loaded',
@@ -170,6 +169,7 @@ export const en: McpManagerDict = {
   disable: 'Disable',
   switchBridgeMissing: 'Install @hualiong/dsh-oauth-mcp-client before this row can be enabled',
   remove: 'Remove',
+  removing: 'Removing “{name}”…',
   formAddTitle: 'Add MCP server',
   formEditTitle: 'Edit {name}',
   fieldId: 'Entry id',

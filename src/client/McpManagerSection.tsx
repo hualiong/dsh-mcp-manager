@@ -51,9 +51,10 @@ import {
   IconPlusOutlineRegular,
   IconRefreshOutlineRegular,
   IconTrashOutlineRegular,
+  IconWarningOutlineRegular,
   Input,
+  Modal,
   PathLabel,
-  RiskConfirmation,
   SegmentedControl,
   StateDot,
   Switch,
@@ -86,14 +87,16 @@ interface SectionProps {
 
 /**
  * Status keys used by the card badge. A connected server reports the tool count
- * itself, so that case reuses the `toolCount` sentence; every other key names
- * one fiber phase. The transport chip never takes part in any of them — a
- * transport is a written-down property of the row, not a connection state — so
- * the status chip is the only one that moves while a server comes up.
+ * itself, so that case reuses the `toolCount` sentence; `statusNotConnected`
+ * covers the one state that is not a fiber phase (an active bridge whose
+ * handshake never succeeded); every other key names one fiber phase. The
+ * transport chip never takes part in any of them — a transport is a written-down
+ * property of the row, not a connection state — so the status chip is the only
+ * one that moves while a server comes up.
  */
 type StatusKey =
   | 'toolCount'
-  | 'statusActiveNoTools'
+  | 'statusNotConnected'
   | 'statusFailed'
   | 'statusDisabled'
   | 'statusNotLoaded'
@@ -413,6 +416,63 @@ const rowIconButtonStyle: CSSProperties = { ...refreshButtonStyle, ...dangerButt
 /** models `.addModelButton`'s placement on the kit's outline `sm` Button (its box is the kit's). */
 const headerAddButtonStyle: CSSProperties = { alignSelf: 'flex-start' }
 
+/**
+ * The remove confirmation is the official models page's delete dialog: a 480px
+ * panel with a hollow, danger-coloured confirm button. Neither property is
+ * reachable through the kit alone — `Modal` takes only a `className`, and no
+ * `Button` variant carries the danger palette — so the two rules live here
+ * under this plugin's own class names. The kit's own class hashes are private
+ * and are deliberately not targeted.
+ */
+const REMOVE_DIALOG_CSS = [
+  'div.dsh-mcp-manager-remove-dialog{width:min(480px,100%)}',
+  'button.dsh-mcp-manager-remove-confirm:not(:disabled){border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}',
+  'button.dsh-mcp-manager-remove-confirm:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}',
+].join('')
+
+/** Owning element id of {@link REMOVE_DIALOG_CSS}; one sheet serves every mount. */
+const REMOVE_DIALOG_STYLE_ID = 'dsh-mcp-manager-remove-dialog-style'
+
+/** models `.warning`: the description row, flagged by the danger-tinted icon. */
+const removeWarningStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: 10,
+  color: 'var(--dsw-alias-label-secondary)',
+  fontSize: 14,
+  lineHeight: '22px',
+}
+/** models `.warningIcon`; `IconProps` has no `style`, so the glyph sits in a span. */
+const removeWarningIconStyle: CSSProperties = {
+  flex: 'none',
+  display: 'inline-flex',
+  marginTop: 2,
+  color: 'var(--dsw-alias-state-error-primary)',
+}
+/** The kit's `RiskConfirmation` owns this reset; `Modal` does not. */
+const removeWarningTextStyle: CSSProperties = { margin: 0 }
+/** models `.error`, shown inside the dialog when the remove call fails. */
+const removeErrorStyle: CSSProperties = {
+  margin: '8px 0 0',
+  color: 'var(--dsw-alias-state-error-primary)',
+  fontSize: 12,
+  lineHeight: '18px',
+}
+
+/**
+ * Install {@link REMOVE_DIALOG_CSS} into the page once.
+ * @returns disposer that removes the sheet, but only when this call added it.
+ */
+function ensureRemoveDialogStyle(): () => void {
+  if (typeof document === 'undefined') return () => {}
+  if (document.getElementById(REMOVE_DIALOG_STYLE_ID) !== null) return () => {}
+  const sheet = document.createElement('style')
+  sheet.id = REMOVE_DIALOG_STYLE_ID
+  sheet.textContent = REMOVE_DIALOG_CSS
+  document.head.append(sheet)
+  return () => { sheet.remove() }
+}
+
 /** `useLayoutEffect` on the client; the server render (the render harness) has no DOM. */
 const useDomLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
 
@@ -506,15 +566,20 @@ export function statusOf(server: McpServerInfo): ServerStatus {
   if (!server.enabled) return { dot: 'idle', tone: 'neutral', key: 'statusDisabled' }
   switch (server.fiberPhase) {
     case 'active':
-      // The fiber being active only means the mcp-client entry is running;
-      // the MCP handshake succeeded only when tools are actually registered.
-      // A connected server reports its tool count alone; with zero tools the
-      // server is effectively not connected, so it must never render green
-      // (that would mislead users into thinking the connection is healthy
-      // when it failed, e.g. HTTP 401 / crash loop).
+      // The fiber being active only means the mcp-client entry is running; the
+      // MCP handshake succeeded only when tools are actually registered. The
+      // bridge's `apply` awaits its *first* connection attempt alone
+      // (`await connection.ready`, mcp-client:831) and tolerates its failure
+      // when `failOnStartupError` is false, so a server that never connected
+      // still reports an active fiber with zero tools while the bridge retries
+      // in the background (500ms → 1s → 2s → 4s …, RECONNECT_DEFAULTS). That
+      // whole wait has no fiber phase of its own, which is why it is named here
+      // rather than folded into `statusLoading` or left as a bare tool count.
+      // It must never render green: zero tools means not connected (e.g. HTTP
+      // 401 / crash loop), not a healthy connection.
       return server.toolCount > 0
         ? { dot: 'done', tone: 'success', key: 'toolCount', count: String(server.toolCount) }
-        : { dot: 'warning', tone: 'warning', key: 'statusActiveNoTools' }
+        : { dot: 'warning', tone: 'warning', key: 'statusNotConnected' }
     case 'failed':
       return { dot: 'error', tone: 'danger', key: 'statusFailed' }
     case 'loading':
@@ -544,12 +609,24 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [removing, setRemoving] = useState<McpServerInfo | null>(null)
-  const [acknowledged, setAcknowledged] = useState(false)
+  const [removingBusy, setRemovingBusy] = useState(false)
+  const [removeError, setRemoveError] = useState<string | null>(null)
   const [notice, setNotice] = useState<NoticeKey | null>(null)
 
   const anyExpanded = Object.values(expanded).some((open) => open === true)
   const formOpen = adding || anyExpanded
   const actionsDisabled = busy !== null || formOpen
+
+  /**
+   * Ids the user just removed. A loader entry is the authority for whether a
+   * server exists — `listMcpServers` enumerates `ctx.loader.entries()` — and the
+   * harness only drops that entry once its watcher has hot-reloaded
+   * `cordis.patch.yml`, so the host keeps reporting the row for a while after
+   * `remove` has already resolved. Hiding it here is what lets the card leave
+   * together with the dialog; an id the host stops reporting is dropped from
+   * the set again, so it never outlives the reload it papers over.
+   */
+  const hiddenRemovals = useRef<Set<string>>(new Set())
 
   /**
    * Read the host list. A quiet read — the stream nudge, every post-write read,
@@ -566,7 +643,23 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     }
     try {
       const { servers: list } = await callRpc<{ servers: McpServerInfo[] }>('list')
-      setServers(list)
+      const live = new Set(list.map((server) => server.id))
+      for (const id of hiddenRemovals.current) {
+        // The host stopped reporting the row: the reload landed, stop hiding.
+        if (!live.has(id)) hiddenRemovals.current.delete(id)
+      }
+      const visible = list.filter((server) => !hiddenRemovals.current.has(server.id))
+      setServers(visible)
+      setExpanded((previous) => {
+        // An editor can only be closed from its own card, so a flag whose card
+        // is no longer listed would stay true forever: `formOpen` would then
+        // keep the header's Add button disabled. Prune on every list so any
+        // route to a vanished row — this panel's own removal, or the patch file
+        // being edited elsewhere — cannot strand one.
+        const listed = new Set(visible.map((server) => server.id))
+        const kept = Object.entries(previous).filter(([id, open]) => open !== true || listed.has(id))
+        return kept.length === Object.keys(previous).length ? previous : Object.fromEntries(kept)
+      })
       const { patch } = await callRpc<{ patch: PatchInfo }>('patchInfo')
       setPatchInfo(patch)
     } catch (err) {
@@ -618,6 +711,9 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     }
   }, [refresh])
 
+  /** The remove dialog's width and danger confirm button; see {@link REMOVE_DIALOG_CSS}. */
+  useEffect(ensureRemoveDialogStyle, [])
+
   /**
    * Run one action behind the busy flag, then revalidate with a quiet read. A
    * new action retires the previous notice, so a stale result cannot outlive
@@ -652,19 +748,62 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   }, [])
 
   const requestRemove = useCallback((server: McpServerInfo) => {
-    setAcknowledged(false)
+    setRemoveError(null)
     setRemoving(server)
   }, [])
 
+  /**
+   * Dismiss the remove dialog. Esc, the backdrop and the X all reach it through
+   * `onCancel`, so one guard makes an operation in flight undismissible — the
+   * same rule the official models dialog enforces with `if (deleting) return`.
+   */
+  const closeRemove = useCallback(() => {
+    if (removingBusy) return
+    setRemoving(null)
+    setRemoveError(null)
+  }, [removingBusy])
+
+  /**
+   * Remove the pending server. Unlike the other actions this one does not go
+   * through {@link run}: the dialog has to stay open, with its confirm button
+   * disabled and relabelled, for the whole round trip, so that completion and
+   * the card's disappearance read as one event instead of a dialog closing onto
+   * a list that still shows the row.
+   *
+   * The card is then hidden locally rather than waited for. `remove` only
+   * rewrites the patch file and nudges the stream; the host's `list` answers
+   * from the live loader, which keeps the row until the harness finishes
+   * hot-reloading the file — so a post-write read cannot confirm the removal.
+   */
   const confirmRemove = useCallback(() => {
     const target = removing
-    if (target === null) return
-    setRemoving(null)
-    void run(() => callRpc('remove', { id: target.id }), `remove:${target.id}`)
-  }, [removing, run])
+    if (target === null || removingBusy) return
+    setRemovingBusy(true)
+    setRemoveError(null)
+    callRpc('remove', { id: target.id }).then(() => {
+      hiddenRemovals.current.add(target.id)
+      setServers((previous) => previous.filter((server) => server.id !== target.id))
+      // The row is gone, so its editor can never be closed by hand again: the
+      // card that owned it no longer renders. Leaving the flag set would keep
+      // `formOpen` true forever, which disables the header's Add button and the
+      // empty-state hint until the page is remounted.
+      setExpanded((previous) => ({ ...previous, [target.id]: false }))
+      setRemoving(null)
+      void refresh({ quiet: true })
+    }).catch((err: unknown) => {
+      // Keep the dialog open on failure so retrying costs one click.
+      setRemoveError(errorMessage(err, t))
+    }).finally(() => {
+      setRemovingBusy(false)
+    })
+  }, [refresh, removing, removingBusy, t])
 
   /** The add card saved: close it, re-read the list, then report the probe. */
   const savedAdd = useCallback(async (result?: SaveResult) => {
+    // The host echoes the id it just wrote. Re-adding a server under the id of a
+    // removal whose reload has not landed yet must un-hide it, or the new card
+    // would be invisible until the next page load.
+    if (result?.added !== undefined) hiddenRemovals.current.delete(result.added)
     setAdding(false)
     await run(() => Promise.resolve(), 'form:add')
     setNotice(noticeOf(result, true))
@@ -885,24 +1024,89 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
         </div>
       ) : null}
 
-      <RiskConfirmation
-        open={removing !== null}
-        title={t('removeTitle')}
-        description={t('removeDesc', {
-          name: removing !== null ? displayName(removing) : '',
-          id: removing?.id ?? '',
-        })}
-        acknowledgeLabel={t('removeAck')}
-        cancelLabel={t('cancel')}
-        closeLabel={t('cancel')}
-        confirmLabel={t('remove')}
-        acknowledged={acknowledged}
-        disabled={busy !== null}
-        onAcknowledgedChange={setAcknowledged}
-        onCancel={() => setRemoving(null)}
+      <RemoveConfirmation
+        t={t}
+        target={removing}
+        busy={removingBusy}
+        locked={busy !== null}
+        failure={removeError}
+        onCancel={closeRemove}
         onConfirm={confirmRemove}
       />
     </section>
+  )
+}
+
+/** Props of {@link RemoveConfirmation}. */
+export interface RemoveConfirmationProps {
+  t: TranslateNS<typeof NS>
+  /** The row awaiting confirmation; `null` keeps the dialog closed. */
+  target: McpServerInfo | null
+  /** A remove RPC is in flight: the actions lock and the confirm label says so. */
+  busy: boolean
+  /** Another panel action is running, which locks this dialog too. */
+  locked: boolean
+  /** Text from a failed attempt, shown inside the dialog. */
+  failure: string | null
+  onCancel: () => void
+  onConfirm: () => void
+}
+
+/**
+ * The remove confirmation.
+ *
+ * Built from the kit's `Modal` rather than its `RiskConfirmation`: that
+ * component hard-codes a `primary` (filled) confirm button with a 136px floor,
+ * which is what made this dialog's delete button wider and bluer than the
+ * official one. This mirrors the models page instead — an outline Button in the
+ * danger palette, initial focus parked on the safe action, and a cancel that
+ * refuses while the call is in flight.
+ *
+ * The dialog is held open for the whole round trip and closed by the caller in
+ * the same batch that drops the card, so the two read as one event.
+ * @param props - see {@link RemoveConfirmationProps}.
+ */
+export function RemoveConfirmation({
+  t,
+  target,
+  busy,
+  locked,
+  failure,
+  onCancel,
+  onConfirm,
+}: RemoveConfirmationProps) {
+  const name = target !== null && target.serverName !== '' ? target.serverName : t('unnamed')
+  return (
+    <Modal
+      open={target !== null}
+      onClose={onCancel}
+      title={t('removeTitle')}
+      closeLabel={t('cancel')}
+      className="dsh-mcp-manager-remove-dialog"
+      footer={(
+        <>
+          <Button variant="outline" data-modal-autofocus disabled={locked || busy} onClick={onCancel}>
+            {t('cancel')}
+          </Button>
+          <Button
+            variant="outline"
+            className="dsh-mcp-manager-remove-confirm"
+            disabled={locked || busy}
+            onClick={onConfirm}
+          >
+            {busy ? t('removing', { name }) : t('remove')}
+          </Button>
+        </>
+      )}
+    >
+      <div style={removeWarningStyle}>
+        <span style={removeWarningIconStyle}>
+          <IconWarningOutlineRegular size={18} />
+        </span>
+        <p style={removeWarningTextStyle}>{t('removeDesc', { name, id: target?.id ?? '' })}</p>
+      </div>
+      {failure === null ? null : <p style={removeErrorStyle}>{failure}</p>}
+    </Modal>
   )
 }
 
@@ -924,6 +1128,8 @@ interface ServerFormProps {
  * whether this profile actually has it installed.
  */
 interface SaveResult {
+  /** The id the host wrote, echoed by `add` only. */
+  added?: string
   probe?: McpOAuthProbe
   oauthBridgeMissing?: boolean
 }
