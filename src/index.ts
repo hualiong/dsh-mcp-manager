@@ -9,7 +9,11 @@
  *    tools are registered);
  *  - adds / removes / enables / disables / edits MCP servers by editing the
  *    web profile's `cordis.patch.yml` (the harness HMR watcher hot-reloads
- *    the tree, so changes apply live without a restart).
+ *    the tree, so changes apply live without a restart);
+ *  - hides a server from the agent presets that opt it out of the visibility
+ *    matrix, per agent scope, through `agent.ctx.tools.restrict()` (see
+ *    `./visibility.ts`; the matrix itself lives in the JSON sidecar managed
+ *    by `./policy.ts`, never in the patch file).
  *
  * The browser half talks to this host half over a loopback-only HTTP route
  * (`POST /mcp-manager/<endpoint>`, body `{"payload":…}`, reply
@@ -37,8 +41,10 @@ import {
   MCP_CLIENT_PACKAGE,
   MCP_OAUTH_CLIENT_PACKAGE,
   RPC_CHANNEL,
+  isRecord,
   type McpEndpoint,
   type McpOAuthProbe,
+  type McpPresetInfo,
   type McpServerConfig,
   type McpServerInfo,
 } from './shared.ts'
@@ -55,11 +61,23 @@ import {
 } from './patch.ts'
 import { entryIdTaken, findMcpServer, listMcpServers, serverNameTaken } from './status.ts'
 import { hasAuthorizationHeader, validateMcpConfig } from './validate.ts'
+import { dropServerFromPolicy, loadPolicy, policyPathOf, setPresetVisible, type McpPresetPolicy } from './policy.ts'
+import { createPromptAlignment } from './prompt-align.ts'
+import {
+  createVisibilityManager,
+  readAgentPresets,
+  type PresetRosterRow,
+  type VisibilityHandle,
+} from './visibility.ts'
 
 /** Stable plugin id for loader rows. */
 export const name = 'mcp-manager'
 
-/** Required services: RPC fence, loader tree, tools, HTTP carrier. */
+/** Required services: RPC fence, loader tree, tools, HTTP carrier. Deliberately NOT `systemPrompt`:
+ * the prompt/execution hooks are plain event listeners, and untagged root listeners receive every
+ * scope's events whether or not the emitting service is injected (dsh-scope's dispatch filter admits
+ * them globally) — requiring it here would deny the whole panel on a distro without prompt assembly,
+ * against this plugin's degrade-everywhere philosophy. */
 export const inject = ['connection', 'loader', 'tools', 'webServer']
 
 /** Raw row config — every field defaults in code. */
@@ -261,12 +279,28 @@ export function apply(ctx: Context, rawConfig?: McpManagerRowConfig): void {
   const patchFile = resolvePatchPath(rawConfig?.patchFile)
   const logger = ctx.logger('mcp-manager')
 
+  // L2 masks: the manager registers its own dispose effect, observes agent
+  // and tool events, and runs the first reconcile right here.
+  const listServers = () => listMcpServers(ctx, readMcpPatchRows(readPatchList(patchFile)))
+  const visibility = createVisibilityManager(ctx, {
+    listServers,
+    policy: () => loadPolicy(policyPathOf(patchFile)),
+  })
+
+  // L2 prompt/execution alignment: strips hidden servers' instruction and
+  // resource-name sections and denies the bare `server` resource calls. The
+  // hooks read fresh state per request/call, so no events or handle needed.
+  createPromptAlignment(ctx, {
+    listServers,
+    policy: () => loadPolicy(policyPathOf(patchFile)),
+  })
+
   ctx.effect(() => {
     const channel = createChangeChannel(ctx, patchFile)
     const disposeRoute = ctx.webServer.register({
       kind: 'prefix',
       path: RPC_CHANNEL,
-      handler: (req, res) => handleRequest(ctx, patchFile, channel, req, res),
+      handler: (req, res) => handleRequest(ctx, patchFile, channel, req, res, detectOAuth, visibility),
     })
     return () => {
       // Fiber dispose must release every held-open response, not just stop
@@ -289,6 +323,7 @@ export function apply(ctx: Context, rawConfig?: McpManagerRowConfig): void {
  * @param req - incoming HTTP request.
  * @param res - response owned for this request.
  * @param probe - OAuth probe used to pick a new row's bridge (injectable for tests).
+ * @param visibility - L2 mask manager, when the plugin fiber mounted one.
  */
 export async function handleRequest(
   ctx: Context,
@@ -297,6 +332,7 @@ export async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   probe: OAuthProbe = detectOAuth,
+  visibility?: VisibilityHandle,
 ): Promise<void> {
   const rejection = ctx.connection.requestRejection(req)
   if (rejection !== undefined) {
@@ -329,7 +365,7 @@ export async function handleRequest(
 
   let result: RpcResult<unknown>
   try {
-    result = await dispatch(ctx, patchFile, channel, endpoint as McpEndpoint, payload, probe)
+    result = await dispatch(ctx, patchFile, channel, endpoint as McpEndpoint, payload, probe, visibility)
   } catch (error) {
     // Endpoint failures are data, not transport failures: report them in the
     // envelope so the panel can render them.
@@ -468,6 +504,7 @@ async function dispatch(
   endpoint: McpEndpoint,
   payload: unknown,
   probe: OAuthProbe,
+  visibility?: VisibilityHandle,
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
     case 'list': {
@@ -477,7 +514,16 @@ async function dispatch(
         .map((server) => (
           isBridgeMissing(patchFile, server.ownerPackage) ? { ...server, bridgeMissing: true } : server
         ))
-      return ok({ servers })
+      // The preset row exists only where a roster exists: a deployment without
+      // `agentPresets` keeps the exact pre-L2 response shape.
+      const projection = await readPresetProjection(ctx, patchFile)
+      if (projection === undefined) return ok({ servers })
+      return ok({
+        servers: servers.map((server) => ({
+          ...server,
+          presetPolicy: projectPresetRow(projection.policy, projection.roster, server.id),
+        })),
+      })
     }
     case 'patchInfo': {
       return ok({ patch: { path: patchFile, exists: existsSync(patchFile) } })
@@ -514,6 +560,10 @@ async function dispatch(
       const id = readId(payload)
       if (id === undefined) return badRequest()
       editPatchList(patchFile, (rows) => removeMcpRow(rows, id))
+      // The matrix row is orphaned with the entry: drop it, then re-align
+      // every mask so a removed server can no longer hide stale names.
+      dropServerFromPolicy(policyPathOf(patchFile), id)
+      visibility?.reconcile()
       channel.broadcast()
       return ok({ removed: id })
     }
@@ -563,6 +613,46 @@ async function dispatch(
       channel.broadcast()
       return ok({ updated: id, probe: verdict, ...oauthBridgeMarker(ctx, patchFile, owner) })
     }
+    case 'presets': {
+      const svc = readAgentPresets(ctx)
+      if (svc === undefined) return agentPresetsUnavailable()
+      let roster: readonly PresetRosterRow[]
+      try {
+        roster = await svc.compositionInventory()
+      } catch (error) {
+        return agentPresetsUnavailable(error)
+      }
+      const presets = roster
+        .map((row) => toPresetInfo(row))
+        .filter((preset): preset is McpPresetInfo => preset !== undefined)
+      return ok({ presets })
+    }
+    case 'setPresetEnabled': {
+      const id = readId(payload)
+      const presetId = isRecord(payload) ? payload['presetId'] : undefined
+      const enabled = isRecord(payload) ? payload['enabled'] : undefined
+      if (id === undefined || typeof presetId !== 'string' || presetId === '' || typeof enabled !== 'boolean') {
+        return badRequest()
+      }
+      const svc = readAgentPresets(ctx)
+      if (svc === undefined) return agentPresetsUnavailable()
+      let roster: readonly PresetRosterRow[]
+      try {
+        roster = await svc.compositionInventory()
+      } catch (error) {
+        return agentPresetsUnavailable(error)
+      }
+      // The cell may only name a roster preset with a sound declaration: a
+      // broken row's identity is not something a mask may key on.
+      const known = roster.find((preset) => toPresetId(preset) === presetId && !isBrokenPreset(preset))
+      if (known === undefined) {
+        return fail('preset-not-found', `Preset "${presetId}" is not a managed roster entry`)
+      }
+      setPresetVisible(policyPathOf(patchFile), id, presetId, enabled)
+      visibility?.reconcile()
+      channel.broadcast()
+      return ok({ id, presetId, enabled })
+    }
     default: {
       const unhandled: never = endpoint
       return fail('unknown-endpoint', `Unknown endpoint ${String(unhandled)}`)
@@ -578,12 +668,77 @@ function upsertParams(payload: unknown): { id: string; config: McpServerConfig }
   return { id, config: config as unknown as McpServerConfig }
 }
 
+/** The roster service is not installed (or it refused): everything preset-related degrades away. */
+function agentPresetsUnavailable(error?: unknown): RpcResult<never> {
+  const detail = error === undefined ? '' : `: ${error instanceof Error ? error.message : String(error)}`
+  return fail('agent-presets-unavailable', `The agentPresets service is not available in this deployment${detail}`)
+}
+
+/** Read a usable preset id out of a roster row; undefined when the row carries none. */
+function toPresetId(row: PresetRosterRow | undefined): string | undefined {
+  return typeof row?.id === 'string' && row.id !== '' ? row.id : undefined
+}
+
+/** A broken declaration carries a diagnostic and its cells cannot be edited. */
+function isBrokenPreset(row: PresetRosterRow): boolean {
+  return row['broken'] !== undefined && row['broken'] !== null
+}
+
+/** Project one roster row onto the wire shape shared with the client; rows without a usable id drop out. */
+function toPresetInfo(row: PresetRosterRow): McpPresetInfo | undefined {
+  const id = toPresetId(row)
+  if (id === undefined) return undefined
+  const info: McpPresetInfo = { id, isDefault: row['isDefault'] === true }
+  if (typeof row['name'] === 'string') info.name = row['name']
+  if (typeof row['description'] === 'string') info.description = row['description']
+  if (isBrokenPreset(row)) info.broken = String(row['broken'])
+  return info
+}
+
+/**
+ * The roster ids and exception matrix the `list` projection needs, or
+ * undefined when the deployment has no usable preset roster — then the
+ * `presetPolicy` field stays absent and the response keeps its pre-L2 shape.
+ */
+async function readPresetProjection(
+  ctx: Context,
+  patchFile: string,
+): Promise<{ roster: string[]; policy: McpPresetPolicy } | undefined> {
+  const svc = readAgentPresets(ctx)
+  if (svc === undefined) return undefined
+  let roster: string[]
+  try {
+    // The live service answers with a Promise; awaiting a plain array (the
+    // test fake's shape) resolves to itself, so both host shapes work.
+    roster = (await svc.compositionInventory())
+      .map((row) => toPresetId(row))
+      .filter((id): id is string => id !== undefined)
+  } catch {
+    // A refusing roster is a read failure, not a change: project nothing.
+    return undefined
+  }
+  return { roster, policy: loadPolicy(policyPathOf(patchFile)) }
+}
+
+/**
+ * State one server's visibility across the roster: every preset starts at the
+ * default `true` and the stored exception cells overwrite it — cells for
+ * presets outside the roster (deleted or not yet published) stay as the
+ * exceptions they are, waiting for their preset to return.
+ */
+function projectPresetRow(
+  policy: McpPresetPolicy,
+  roster: readonly string[],
+  serverId: string,
+): Record<string, boolean> {
+  const row: Record<string, boolean> = {}
+  for (const presetId of roster) row[presetId] = true
+  Object.assign(row, policy[serverId])
+  return row
+}
+
 /** Read a non-empty string `id` out of a payload. */
 function readId(payload: unknown): string | undefined {
   const id = isRecord(payload) ? payload['id'] : undefined
   return typeof id === 'string' && id !== '' ? id : undefined
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

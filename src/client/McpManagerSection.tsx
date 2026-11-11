@@ -27,6 +27,12 @@
  * its contract is a 24px tertiary process row, so it cannot carry the
  * settings-page title scale or host the row's controls.
  *
+ * Under the header sits the L2 visibility line (`PresetVisibility`): one
+ * switch per agent preset, hiding the row's tools from that preset's agents
+ * while the connection stays global. The line disappears when the host has no
+ * preset roster, and disappears entirely while the global switch is off — a
+ * disconnected server has nothing to mask.
+ *
  * Controls come from the official kit
  * (`@deepseek-ai/dsh-client-ui-primitives`): Button (`sm` = the 28px actions
  * this panel uses everywhere), Input, Switch, Tag, StateDot, Tooltip,
@@ -67,12 +73,14 @@ import { EVENT_CHANNEL } from '../shared.ts'
 import type {
   McpFieldErrors,
   McpOAuthProbe,
+  McpPresetInfo,
   McpServerConfig,
   McpServerInfo,
   McpTransport,
 } from '../shared.ts'
 import { callRpc, McpManagerRpcError, McpManagerTransportError } from './rpc.ts'
 import { NS } from './locales.ts'
+import type { McpManagerKeys } from './locales.ts'
 
 /** Patch-file snapshot shown in the page footer. */
 interface PatchInfo {
@@ -415,6 +423,14 @@ const headerRowStyle: CSSProperties = {
 const rowIconButtonStyle: CSSProperties = { ...refreshButtonStyle, ...dangerButtonStyle }
 /** models `.addModelButton`'s placement on the kit's outline `sm` Button (its box is the kit's). */
 const headerAddButtonStyle: CSSProperties = { alignSelf: 'flex-start' }
+/** The L2 matrix: one compact line of `name + switch` cells. The semantics
+ * live in the line's tooltip, not in visible copy; the row wraps only when
+ * the card is too narrow for every cell. */
+const matrixBlockStyle: CSSProperties = { alignItems: 'center', gap: 14, flexWrap: 'wrap', display: 'flex' }
+/** One matrix cell: the preset's display name and its switch. */
+const matrixCellStyle: CSSProperties = { alignItems: 'center', gap: 6, display: 'inline-flex' }
+/** inventory `.status`'s 13/20 text scale, secondary, on the preset name. */
+const matrixNameStyle: CSSProperties = { color: 'var(--dsw-alias-label-secondary)', fontSize: 13, lineHeight: '20px' }
 
 /**
  * The remove confirmation is the official models page's delete dialog: a 480px
@@ -602,6 +618,12 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
   const pageRef = useRef<HTMLElement>(null)
   useStablePageGutter(pageRef)
   const [servers, setServers] = useState<McpServerInfo[]>([])
+  /**
+   * The preset roster (matrix columns). `undefined` means the deployment has
+   * no preset service — the host said so with `agent-presets-unavailable` —
+   * or the roster has never resolved, both of which hide the matrix rows.
+   */
+  const [presets, setPresets] = useState<McpPresetInfo[] | undefined>(undefined)
   const [patchInfo, setPatchInfo] = useState<PatchInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -641,8 +663,22 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
       setLoading(true)
       setError(null)
     }
+    // The roster read runs in parallel with the list read and can never fail
+    // the page: `agent-presets-unavailable` is the host's word for "no preset
+    // service here" — store `undefined` and the matrix rows disappear. Any
+    // other failure (a host mid-reload, an older host without the endpoint)
+    // keeps the last roster instead of flickering the rows off, and none of
+    // them is worth a banner the user did not ask for.
+    const presetsRequest: Promise<McpPresetInfo[] | null> = callRpc<{ presets: McpPresetInfo[] }>('presets')
+      .then((value) => (Array.isArray(value.presets) ? value.presets : null))
+      .catch((err: unknown) => {
+        if (err instanceof McpManagerRpcError && err.code === 'agent-presets-unavailable') setPresets(undefined)
+        return null
+      })
     try {
       const { servers: list } = await callRpc<{ servers: McpServerInfo[] }>('list')
+      const roster = await presetsRequest
+      if (roster !== null) setPresets(roster)
       const live = new Set(list.map((server) => server.id))
       for (const id of hiddenRemovals.current) {
         // The host stopped reporting the row: the reload landed, stop hiding.
@@ -823,6 +859,35 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
     )
   }, [run])
 
+  /**
+   * Flip one matrix cell: hide or show this server for one preset.
+   *
+   * The cell flips optimistically before the write leaves, so it answers the
+   * click at once; the host's `changed` broadcast then triggers the quiet
+   * list re-read that lands the cell on the host's truth (the projection in
+   * `list` is authoritative). A refused write re-reads explicitly — the
+   * optimistic flip must not survive the rejection it was waiting for — and
+   * still raises the page error line, exactly like a failed global toggle.
+   */
+  const togglePresetVisible = useCallback((server: McpServerInfo, preset: McpPresetInfo) => {
+    const serverId = server.id
+    const presetId = preset.id
+    // Missing cell = visible; the click asks for the opposite of what shows now.
+    const visible = server.presetPolicy?.[presetId] !== false
+    const desired = !visible
+    setServers((previous) => previous.map((row) => (row.id === serverId
+      ? { ...row, presetPolicy: { ...row.presetPolicy, [presetId]: desired } }
+      : row)))
+    void run(async () => {
+      try {
+        await callRpc('setPresetEnabled', { id: serverId, presetId, enabled: desired })
+      } catch (err) {
+        await refresh({ quiet: true })
+        throw err
+      }
+    }, `preset:${serverId}:${presetId}`)
+  }, [refresh, run])
+
   const summary = useMemo(() => {
     const enabled = servers.filter((s) => s.enabled).length
     const connected = servers.filter((s) => s.enabled && s.fiberPhase === 'active' && s.toolCount > 0).length
@@ -1000,6 +1065,30 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
                 </Tooltip>
               </div>
 
+              {/*
+               * The L2 visibility line (§8), directly under the header and its
+               * global switch. It renders only while the global switch is ON —
+               * a disabled row holds no connection and has nothing to mask,
+               * so the line is hidden, not dimmed — and only when the
+               * deployment has a roster (the `presets` read resolved to a
+               * non-empty list) AND the host projects this row's policy
+               * cells; either signal absent means the host half has no
+               * preset service, and the line disappears without a trace —
+               * the graceful degradation of §5.5. An enabled row shows the
+               * line even while it is still connecting or has failed: the
+               * policy is about visibility, not health, and masks land on
+               * the tools the moment the bridge registers them.
+               */}
+              {server.enabled === true && presets !== undefined && presets.length > 0 && server.presetPolicy !== undefined ? (
+                <PresetVisibility
+                  t={t}
+                  server={server}
+                  presets={presets}
+                  locked={actionsDisabled}
+                  onToggle={togglePresetVisible}
+                />
+              ) : null}
+
               {open ? (
                 <div style={editorStyle} id={regionId}>
                   <ServerForm
@@ -1034,6 +1123,90 @@ export function McpManagerSection({ t }: SectionProps): JSX.Element {
         onConfirm={confirmRemove}
       />
     </section>
+  )
+}
+
+/** Props of {@link PresetVisibility}. */
+interface PresetVisibilityProps {
+  t: TranslateNS<typeof NS>
+  /** The server row whose matrix line this is. */
+  server: McpServerInfo
+  /** The roster in host order — one cell per preset. */
+  presets: readonly McpPresetInfo[]
+  /** Another panel action is running or an editor is open: switches refuse input. */
+  locked: boolean
+  onToggle: (server: McpServerInfo, preset: McpPresetInfo) => void
+}
+
+/**
+ * Shipped preset ids whose display names follow the GUI language. The preset
+ * registry refuses duplicate preset ids, so a custom preset can never shadow
+ * these; any other preset shows its published name, falling back to the raw id.
+ */
+const PRESET_NAME_KEYS: Record<string, McpManagerKeys> = {
+  standard: 'presetNameStandard',
+  ptc: 'presetNamePtc',
+  minimal: 'presetNameMinimal',
+  cordis: 'presetNameCordis',
+}
+
+/**
+ * The visibility line of one server card (design §8, trimmed): a compact row
+ * of `name + switch` cells under the global switch — no label, no badge, no
+ * explanation text. What the cells mean lives in the row's tooltip; the
+ * default preset is no longer marked visibly because it is simply the column
+ * unnamed sessions read. The caller only mounts this line while the global
+ * switch is on (a disabled row has no connection to mask) and regardless of
+ * connection health (the policy lands the moment the bridge registers tools).
+ * A `broken` preset declaration greys out just its own cell: read-only, with
+ * the host's diagnostic verbatim in the tooltip.
+ * @param props - see {@link PresetVisibilityProps}.
+ */
+export function PresetVisibility({
+  t,
+  server,
+  presets,
+  locked,
+  onToggle,
+}: PresetVisibilityProps): JSX.Element {
+  return (
+    <div title={t('presetVisHint')} style={matrixBlockStyle}>
+      {presets.map((preset) => {
+        // Missing cell = visible: only an explicit `false` hides the server.
+        const visible = server.presetPolicy?.[preset.id] !== false
+        const nameKey = PRESET_NAME_KEYS[preset.id]
+        const name = nameKey === undefined ? preset.name ?? preset.id : t(nameKey)
+        const broken = preset.broken !== undefined && preset.broken !== ''
+        return (
+          <Tooltip
+            key={preset.id}
+            label={preset.broken ?? ''}
+            side="bottom"
+            delayMs={500}
+            focusDelayMs={500}
+            portal
+            disabled={!broken}
+          >
+            {/*
+             * The anchor is the whole cell span, not the Switch: a disabled
+             * button fires no pointer events, so a broken preset's diagnosis
+             * anchored on it could never be read (same rule as the global
+             * switch's tooltip above).
+             */}
+            <span style={matrixCellStyle}>
+              <span style={matrixNameStyle}>{name}</span>
+              <Switch
+                checked={visible}
+                label={name}
+                title={visible ? t('presetVisOn') : t('presetVisOff')}
+                disabled={locked || broken}
+                onChange={() => onToggle(server, preset)}
+              />
+            </span>
+          </Tooltip>
+        )
+      })}
+    </div>
   )
 }
 

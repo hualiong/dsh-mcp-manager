@@ -24,6 +24,11 @@ export const MCP_CLIENT_PACKAGES: readonly string[] = [
   MCP_OAUTH_CLIENT_PACKAGE,
 ]
 
+/** Whether a value is a plain object (null and arrays excluded) — the plugin-wide record guard. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 /** Logical Connection RPC channel registered by the host half. */
 export const RPC_CHANNEL = '/mcp-manager'
 
@@ -113,6 +118,26 @@ export interface McpServerConfig {
   authorizationTimeoutMs?: number
 }
 
+/**
+ * One agent preset in the roster (L2 visibility matrix column).
+ *
+ * Projected from the optional `agentPresets` service
+ * (`compositionInventory()`); absent service means the deployment has no
+ * presets and the panel hides the matrix entirely.
+ */
+export interface McpPresetInfo {
+  /** Preset identity (`config.id`), the key used by the policy matrix. */
+  id: string
+  /** Published display name. */
+  name?: string
+  /** Published display description. */
+  description?: string
+  /** Whether sessions naming no preset compose this one. */
+  isDefault: boolean
+  /** Reason the declaration is broken; a broken preset cannot be managed. */
+  broken?: string
+}
+
 /** Full server snapshot the host exposes to the client. */
 export interface McpServerInfo extends McpServerConfig {
   /** Loader entry id of the bridge plugin instance. */
@@ -127,6 +152,14 @@ export interface McpServerInfo extends McpServerConfig {
   toolCount: number
   /** true when this server is defined in the user patch layer (removable). */
   userManaged: boolean
+  /**
+   * L2 preset visibility row (`presetId -> visible`). Only exceptions are
+   * stated: a missing cell means visible, matching the matrix default of "on
+   * for every preset". Absent when the deployment has no preset roster.
+   * Hiding a server from a preset masks its `mcp__<serverName>__*` tools in
+   * that preset's agent scopes; the connection itself stays global.
+   */
+  presetPolicy?: Record<string, boolean>
   /**
    * true when this row's bridge package cannot be resolved from the profile, so
    * the row cannot load and must not be switched on. The panel disables the
@@ -155,6 +188,10 @@ export type McpEndpoint =
   | 'setEnabled'
   | 'update'
   | 'patchInfo'
+  /** Roster of agent presets (matrix columns); fails `agent-presets-unavailable` when absent. */
+  | 'presets'
+  /** Flip one matrix cell: `{ id, presetId, enabled }` — visibility of a server for one preset. */
+  | 'setPresetEnabled'
 
 /** Server-side validation errors, keyed by field for inline form display. */
 export type McpFieldErrors = Partial<Record<keyof McpServerConfig | 'id', string>>

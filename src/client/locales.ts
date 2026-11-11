@@ -42,6 +42,13 @@ export type McpManagerKeys =
   | 'enable'
   | 'disable'
   | 'switchBridgeMissing'
+  | 'presetVisHint'
+  | 'presetVisOn'
+  | 'presetVisOff'
+  | 'presetNameStandard'
+  | 'presetNamePtc'
+  | 'presetNameMinimal'
+  | 'presetNameCordis'
   | 'remove'
   | 'removing'
   | 'formAddTitle'
@@ -109,6 +116,13 @@ export const zh: McpManagerDict = {
   enable: '启用',
   disable: '停用',
   switchBridgeMissing: '需要先安装 @hualiong/dsh-oauth-mcp-client 才能启用',
+  presetVisHint: '关掉 = 该预设的 Agent 看不到此服务器的工具；连接为全局共享',
+  presetVisOn: '对该预设可见',
+  presetVisOff: '对该预设隐藏',
+  presetNameStandard: '标准模式',
+  presetNamePtc: 'PTC 模式',
+  presetNameMinimal: '极简模式',
+  presetNameCordis: '创造模式',
   remove: '删除',
   removing: '正在删除“{name}”…',
   formAddTitle: '添加 MCP 服务器',
@@ -168,6 +182,13 @@ export const en: McpManagerDict = {
   enable: 'Enable',
   disable: 'Disable',
   switchBridgeMissing: 'Install @hualiong/dsh-oauth-mcp-client before this row can be enabled',
+  presetVisHint: 'Off hides this server’s tools from that preset’s Agent; the connection itself is shared globally',
+  presetVisOn: 'Visible to this preset',
+  presetVisOff: 'Hidden from this preset',
+  presetNameStandard: 'Standard',
+  presetNamePtc: 'PTC',
+  presetNameMinimal: 'Minimal',
+  presetNameCordis: 'Creator',
   remove: 'Remove',
   removing: 'Removing “{name}”…',
   formAddTitle: 'Add MCP server',

@@ -9,12 +9,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { apply, createChangeChannel, handleRequest } from '../src/index.ts'
 import { readPatchList } from '../src/patch.ts'
+import { policyPathOf } from '../src/policy.ts'
 import { MCP_CLIENT_PACKAGE, MCP_OAUTH_CLIENT_PACKAGE } from '../src/shared.ts'
 import { validateMcpConfig } from '../src/validate.ts'
 
@@ -96,6 +97,13 @@ const TOOL_SCHEMAS = [
   { name: 'other' },
 ]
 
+/** A preset roster as `agentPresets.compositionInventory()` publishes it. */
+const PRESET_ROSTER = [
+  { id: 'standard', name: 'Standard', description: 'Everyday sessions', isDefault: true, rows: [] },
+  { id: 'writing', name: 'Writing', isDefault: false, rows: [] },
+  { id: 'broken-one', name: 'Broken', isDefault: false, broken: 'declaration row failed to parse' },
+]
+
 /**
  * Mount the host half over fake sibling services and return the mounted route.
  *
@@ -108,6 +116,8 @@ function harness({
   entries = ENTRIES,
   tools = TOOL_SCHEMAS,
   probe = async () => 'plain',
+  presets,
+  syncRoster = false,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'mcp-manager-route-'))
   const patchFile = join(dir, 'cordis.patch.yml')
@@ -116,6 +126,7 @@ function harness({
   const routes = []
   const disposers = []
   const warnings = []
+  const events = new Map()
   // Cordis' logger is both callable (`ctx.logger('scope')`) and a logger.
   const childLogger = {
     info() {},
@@ -137,21 +148,52 @@ function harness({
     effect(callback) {
       disposers.push(callback())
     },
+    on(name, handler) {
+      const list = events.get(name) ?? []
+      list.push(handler)
+      events.set(name, list)
+      return () => {
+        const live = events.get(name)
+        if (live === undefined) return
+        events.set(name, live.filter((entry) => entry !== handler))
+      }
+    },
+    // Only the services the L2 endpoints touch; every other name stays absent
+    // (the deployment without `agentPresets` is the default).
+    get(name) {
+      if (name === 'agentPresets' && presets !== undefined) {
+        return {
+          compositionInventory: syncRoster ? () => presets : async () => presets,
+          composedPreset: () => undefined,
+        }
+      }
+      return undefined
+    },
   }
   apply(ctx, { patchFile })
   assert.equal(routes.length, 1, 'apply() must mount exactly one route')
 
   const channel = createChangeChannel(ctx, patchFile)
+  // The live route hands the visibility manager to handleRequest (see apply());
+  // the harness passes a counting stand-in so the "matrix write → immediate
+  // reconcile" wiring on setPresetEnabled/remove stays pinned: an idle session
+  // emits no tools/change, so this call is the whole "拨开关即时生效" promise.
+  const reconciles = { count: 0 }
+  const visibility = { reconcile: () => { reconciles.count += 1 } }
   const route = {
     ...routes[0],
-    handler: (req, res) => handleRequest(ctx, patchFile, channel, req, res, probe),
+    handler: (req, res) => handleRequest(ctx, patchFile, channel, req, res, probe, visibility),
+  }
+  /** Deliver one host event to everything apply() subscribed to. */
+  const emit = (name, payload) => {
+    for (const handler of [...(events.get(name) ?? [])]) handler(payload)
   }
   // Dispose the plugin fiber exactly as the loader would on unload.
   const dispose = () => {
     channel.close()
     for (const disposer of disposers) disposer()
   }
-  return { route, patchFile, dispose, warnings }
+  return { route, patchFile, dir, dispose, warnings, emit, ctx, reconciles }
 }
 
 /** Fake the OAuth bridge being installed in a profile directory. */
@@ -927,4 +969,144 @@ test('an unreachable endpoint is a handled failure, not a transport error', asyn
   assert.equal(reply.status, 200)
   assert.equal(reply.json.ok, false)
   assert.equal(reply.json.error.code, 'unknown-endpoint')
+})
+
+/** Read the parsed policy sidecar of a harness run. */
+function policyOf(patchFile) {
+  return JSON.parse(readFileSync(policyPathOf(patchFile), 'utf8'))
+}
+
+test('presets reports the roster projected onto the wire shape', async () => {
+  const { route } = harness({ presets: PRESET_ROSTER })
+  const reply = await endpoint(route, 'presets', null)
+  assert.equal(reply.json.ok, true)
+  // Only the declared members survive: `rows` and unknown extras stay host-side.
+  assert.deepEqual(reply.json.value.presets, [
+    { id: 'standard', name: 'Standard', description: 'Everyday sessions', isDefault: true },
+    { id: 'writing', name: 'Writing', isDefault: false },
+    { id: 'broken-one', name: 'Broken', isDefault: false, broken: 'declaration row failed to parse' },
+  ])
+})
+
+test('a synchronous compositionInventory works exactly like the live Promise form', async () => {
+  // The real service returns a Promise; a plain array must keep working too,
+  // so the await-based endpoints pin both shapes instead of one by accident.
+  const run = harness({ presets: PRESET_ROSTER, syncRoster: true })
+  const roster = await endpoint(run.route, 'presets', null)
+  assert.equal(roster.json.ok, true)
+  assert.equal(roster.json.value.presets.length, 3)
+  const flip = await endpoint(run.route, 'setPresetEnabled', {
+    id: 'oauth-mcp-cloudflare', presetId: 'writing', enabled: false,
+  })
+  assert.equal(flip.json.ok, true)
+  const cloudflare = listOf(await endpoint(run.route, 'list', null))
+    .find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.equal(cloudflare.presetPolicy.writing, false)
+})
+
+test('presets and setPresetEnabled degrade away without the agentPresets service', async () => {
+  const { route } = harness()
+  const roster = await endpoint(route, 'presets', null)
+  assert.equal(roster.json.ok, false)
+  assert.equal(roster.json.error.code, 'agent-presets-unavailable')
+
+  const flip = await endpoint(route, 'setPresetEnabled', {
+    id: 'mcp-github', presetId: 'writing', enabled: false,
+  })
+  assert.equal(flip.json.error.code, 'agent-presets-unavailable')
+})
+
+test('setPresetEnabled stores exceptions only and states them back in list', async () => {
+  const run = harness({ presets: PRESET_ROSTER })
+  const off = await endpoint(run.route, 'setPresetEnabled', {
+    id: 'oauth-mcp-cloudflare', presetId: 'writing', enabled: false,
+  })
+  assert.deepEqual(off.json, {
+    ok: true, value: { id: 'oauth-mcp-cloudflare', presetId: 'writing', enabled: false },
+  })
+  assert.equal(run.reconciles.count, 1, 'a stored flip reconciles the masks at once')
+  // The file carries the exception and nothing else — no default `true` cells.
+  assert.deepEqual(policyOf(run.patchFile), { 'oauth-mcp-cloudflare': { writing: false } })
+
+  // `list` keeps its shape and gains the projected row: roster defaults
+  // stated as true, the flipped cell stated false.
+  const cloudflare = listOf(await endpoint(run.route, 'list', null))
+    .find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.deepEqual(cloudflare.presetPolicy, { standard: true, writing: false, 'broken-one': true })
+
+  // Switching back deletes the cell; an empty row does not survive.
+  const on = await endpoint(run.route, 'setPresetEnabled', {
+    id: 'oauth-mcp-cloudflare', presetId: 'writing', enabled: true,
+  })
+  assert.equal(on.json.ok, true)
+  assert.deepEqual(policyOf(run.patchFile), {})
+  const back = listOf(await endpoint(run.route, 'list', null))
+    .find((server) => server.id === 'oauth-mcp-cloudflare')
+  assert.deepEqual(back.presetPolicy, { standard: true, writing: true, 'broken-one': true })
+
+  run.dispose()
+})
+
+test('list omits presetPolicy entirely without a roster and never breaks the old shape', async () => {
+  const servers = listOf(await endpoint(harness().route, 'list', null))
+  for (const server of servers) {
+    assert.equal('presetPolicy' in server, false, server.id)
+  }
+  // The untouched pre-L2 fields still hold.
+  assert.equal(servers.find((server) => server.id === 'mcp-github').serverName, 'github')
+})
+
+test('setPresetEnabled rejects malformed payloads, unknown presets and broken declarations', async () => {
+  const { route, patchFile } = harness({ presets: PRESET_ROSTER })
+  const malformed = [
+    null,
+    {},
+    { id: 'mcp-github' },
+    { id: 'mcp-github', presetId: 'writing' },
+    { id: 'mcp-github', presetId: 'writing', enabled: 'yes' },
+    { id: 'mcp-github', presetId: '', enabled: false },
+    { presetId: 'writing', enabled: false },
+    { id: 7, presetId: 'writing', enabled: false },
+  ]
+  for (const payload of malformed) {
+    const reply = await endpoint(route, 'setPresetEnabled', payload)
+    assert.equal(reply.json.error.code, 'bad-request', JSON.stringify(payload))
+  }
+
+  for (const presetId of ['nope', 'broken-one']) {
+    const reply = await endpoint(route, 'setPresetEnabled', { id: 'mcp-github', presetId, enabled: false })
+    assert.equal(reply.json.error.code, 'preset-not-found', presetId)
+  }
+  assert.equal(existsSync(policyPathOf(patchFile)), false, 'a refused write must not create the sidecar')
+})
+
+test('remove drops the matrix row and leaves foreign rows alone', async () => {
+  const run = harness({ presets: PRESET_ROSTER })
+  await endpoint(run.route, 'setPresetEnabled', { id: 'oauth-mcp-cloudflare', presetId: 'writing', enabled: false })
+  await endpoint(run.route, 'setPresetEnabled', { id: 'mcp-github', presetId: 'standard', enabled: false })
+
+  const reply = await endpoint(run.route, 'remove', { id: 'oauth-mcp-cloudflare' })
+  assert.deepEqual(reply.json, { ok: true, value: { removed: 'oauth-mcp-cloudflare' } })
+  assert.equal(run.reconciles.count, 3, 'the row removal reconciles too (two flips + this remove)')
+  assert.deepEqual(policyOf(run.patchFile), { 'mcp-github': { standard: false } },
+    'only the removed server\'s row is cleaned')
+
+  // A row the matrix never mentioned: the sidecar is left untouched.
+  const before = readFileSync(policyPathOf(run.patchFile), 'utf8')
+  await endpoint(run.route, 'remove', { id: 'mcp-stdio-local' })
+  assert.equal(readFileSync(policyPathOf(run.patchFile), 'utf8'), before)
+
+  run.dispose()
+})
+
+test('a preset flip nudges every open stream exactly once', async () => {
+  const run = harness({ presets: PRESET_ROSTER })
+  const stream = await subscribe(run.route)
+  const flip = await endpoint(run.route, 'setPresetEnabled', {
+    id: 'mcp-github', presetId: 'writing', enabled: false,
+  })
+  assert.equal(flip.json.ok, true)
+  assert.equal(stream.res.written(), 'data: {"type":"ready"}\n\n' + 'data: {"type":"changed"}\n\n')
+  stream.res.clientClose()
+  run.dispose()
 })

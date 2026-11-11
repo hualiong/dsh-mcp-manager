@@ -19,6 +19,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { McpPatchRow } from './patch.ts'
 import {
+  isRecord,
   MCP_CLIENT_PACKAGES,
   MCP_OAUTH_CLIENT_PACKAGE,
   type FiberPhase,
@@ -68,10 +69,6 @@ export function toServerConfig(raw: unknown, oauth: boolean): McpServerConfig {
       ? cfg['authorizationTimeoutMs']
       : undefined,
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Count tools registered on the harness registry under a server namespace. */

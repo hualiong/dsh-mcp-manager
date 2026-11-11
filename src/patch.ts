@@ -20,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import * as yaml from 'js-yaml'
-import { MCP_CLIENT_PACKAGE, MCP_CLIENT_PACKAGES, MCP_OAUTH_CLIENT_PACKAGE, type McpServerConfig } from './shared.ts'
+import { MCP_CLIENT_PACKAGE, MCP_CLIENT_PACKAGES, MCP_OAUTH_CLIENT_PACKAGE, isRecord, type McpServerConfig } from './shared.ts'
 
 /**
  * Mirrors `isJsExpr` from @deepseek-ai/cordis-plugin-loader (the harness's own
@@ -95,10 +95,6 @@ const PLUGIN_CONFIG_KEYS: Record<string, readonly string[]> = {
     'serverName', 'url', 'credentialRef', 'scope', 'headers', 'callbackPort',
     'authorizationTimeoutMs', 'toolCallTimeoutMs', 'failOnStartupError', 'reconnect',
   ],
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**
