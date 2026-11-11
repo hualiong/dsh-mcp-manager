@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -87,6 +87,13 @@ test('a visible flip deletes the cell, and an empty row goes with it', () => {
 test('setting an already-stated visibility does not touch the file', () => {
   const { file } = scratch()
   setPresetVisible(file, 'srv', 'p1', false)
+  // Stamp the sidecar 5s in the past before watching its mtime: on a fast CI
+  // filesystem the whole test can land inside one timestamp quantum (Linux
+  // runner, 2026-11-12 v0.2.0), where "the mtime moved" is no witness at all.
+  // An old stamp cannot collide with "now" at any granularity, and both
+  // directions of the assertion stay meaningful (a rewrite bug still moves it).
+  const past = (Date.now() - 5000) / 1000
+  utimesSync(file, past, past)
   const before = statSync(file).mtimeMs
 
   // The default holds without a cell: asking for `true` on an absent cell is a no-op.
